@@ -1,0 +1,7 @@
+.vscode/
+debug/
+target/
+output/
+schemas/
+*.json
+*.sqlite3
