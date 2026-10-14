@@ -71,10 +71,11 @@ impl Settings {
     }
 
     pub fn init_resources(&mut self, path: Option<&PathBuf>) -> Result<()> {
-        if let Some(p) = path && p.exists(){
+        if let Some(p) = path
+            && p.exists()
+        {
             self.game_path = p.to_path_buf();
-        }
-        else if !self.game_path.exists() {
+        } else if !self.game_path.exists() {
             println!("Check for {} fail", self.game_path.display());
             self.game_path =
                 find_install().ok_or_else(|| anyhow!("Unable to find FFXIV install path."))?;
@@ -97,11 +98,13 @@ impl Settings {
 
     pub fn get_game_ver(&self) -> Result<String> {
         let ver_path = self.game_path.join("game").join("ffxivgame.ver");
-        let mut ver_file = File::open(ver_path).context("Unable to open version file. Check that the given FFXIV install path is correct.")?;
+        let mut ver_file = File::open(ver_path).context(
+            "Unable to open version file. Check that the given FFXIV install path is correct.",
+        )?;
         let mut ver_str = String::new();
-        ver_file
-            .read_to_string(&mut ver_str)
-            .context("Unable to read from version file. Check that the given FFXIV install path is correct.")?;
+        ver_file.read_to_string(&mut ver_str).context(
+            "Unable to read from version file. Check that the given FFXIV install path is correct.",
+        )?;
         Ok(ver_str)
     }
 }

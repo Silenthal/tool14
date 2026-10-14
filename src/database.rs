@@ -1,9 +1,11 @@
+use std::sync::LazyLock;
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use crate::database_import;
 use crate::settings;
 use anyhow::{Context, Result, anyhow};
 use ironworks::excel::{Excel, Field};
+use regex::Regex;
 use rusqlite::{Connection, params};
 
 use crate::{
@@ -11,6 +13,8 @@ use crate::{
 };
 
 use crate::model::quest::Quest;
+
+static REGEX_OWNER_CHECK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z]\w+'s? ").unwrap());
 
 pub struct Database {
     pub conn: Connection,
@@ -91,6 +95,86 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_item_qty_desc(
+        &self,
+        id: i32,
+        count: i32,
+        is_hq: bool,
+        dye: i32,
+    ) -> Result<Option<String>> {
+        if id == 0 {
+            return Ok(None);
+        }
+        let hq_suffix = if is_hq { " {{HQ}}" } else { "" };
+
+        let dye_color = if dye > 0
+            && let Some(x) = self.get_name_in_table("Stain", "Name", dye)?
+        {
+            format!(" ({x})")
+        } else {
+            String::new()
+        };
+
+        let table_name = match id {
+            1..=65535 => "Item",
+            2000000..3000000 => "EventItem",
+            _ => {
+                return Ok(None);
+            }
+        };
+
+        let query_name_str = format!(
+            "SELECT Name,Singular,Plural,StartsWithVowel FROM {} WHERE RowId = ?",
+            table_name
+        );
+
+        let mut statement_item = self.conn.prepare_cached(&query_name_str)?;
+
+        let (name, single, plural, vowel) = statement_item.query_row(params![id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)? != 0,
+            ))
+        })?;
+
+        // Up to 3: name, full name, qty
+        let mut item_link_parts: Vec<String> = Vec::with_capacity(3);
+        item_link_parts.push(name.clone());
+
+        let temp_name;
+        if count == 1 {
+            // Noun ownership e.g. Azeyma's Sleeve
+            if REGEX_OWNER_CHECK.is_match(&single) {
+                temp_name = format!("{single}{dye_color}");
+            } else if id < 65536 {
+                // regular item, probably not significant
+                let article = if vowel { "an" } else { "a" };
+                temp_name = format!("{article} {single}{dye_color}");
+            } else {
+                // event item, probably significant
+                temp_name = format!("the {single}{dye_color}");
+            }
+        } else {
+            temp_name = format!("{plural}{dye_color}");
+        }
+        if temp_name != name {
+            item_link_parts.push(temp_name);
+        }
+        if is_hq {
+            item_link_parts.push("hq=true".to_string());
+        }
+        if count != 1 {
+            item_link_parts.push(format!("qty={count}"));
+        }
+
+        Ok(Some(format!(
+            "{{{{i|{}}}}}{hq_suffix}",
+            item_link_parts.join("|")
+        )))
     }
 
     pub fn get_item_qty(

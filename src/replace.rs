@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     database::Database,
-    model::{cutscene_dialogue::CutsceneDialogue, quest::Quest},
+    model::{cutscene_dialogue::CutsceneDialogue, item_detail::ItemDetail, quest::Quest},
 };
 use anyhow::Result;
 use ironworks::{Ironworks, excel::Excel};
@@ -214,6 +214,24 @@ static IGNORE_LOOKUP: LazyLock<HashSet<String>> = LazyLock::new(|| {
     s
 });
 
+const FUNCTION_SKIP: &[&str] = &[
+    "IsTodoChecked",
+    "GetTodoArgs",
+    "GetGimmickState",
+    "GetNpcTradeItems",
+    "SCRIPT_VERSION",
+    "IsAnnounce",
+    "IsAcceptEvent",
+];
+
+static FUNCTION_SKIP_LOOKUP: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    let mut s = HashSet::new();
+    for x in FUNCTION_SKIP {
+        s.insert(x.to_string());
+    }
+    s
+});
+
 pub fn process(
     excel: &Excel,
     ironworks: &Ironworks,
@@ -230,6 +248,12 @@ pub fn process(
     let regex_self_var = Regex::new(r"self\.([\w+]+)")?;
     let regex_call = Regex::new(r"(\w+):(\w+)\(([^\)]*)\)")?;
     let regex_dialogue_alt_speaker = Regex::new(r"^\(-([^-]+)-\).*$")?;
+    let regex_item_check = Regex::new(
+        r"(\w+)\[(?<out_index>\d+)\] = \{\s*(?<item_name>[\w\.]+),\s*(?<item_count>\w+),\s*(?<item_is_hq>\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+)\s*\}",
+    )?;
+    let regex_start_item_block = Regex::new(r"([\w\.]+) == (?<listener_id>[\w\.]+) then$")?;
+    let mut listener_to_item = HashMap::new();
+    let mut item_listener_id = 0;
     let mut output: Vec<String> = Vec::new();
     let mut state: State = State {
         database,
@@ -245,6 +269,8 @@ pub fn process(
     let mut skip_to_end = false;
     let mut trim_after = false;
     let mut script_version: i32 = 0;
+    let mut inside_item_block = false;
+    let mut temp_item_map = HashMap::new();
 
     if quest.listener_start != "" {
         state.listener_key_to_name.insert(
@@ -268,23 +294,6 @@ pub fn process(
         }
     }
 
-    for line in lines {
-        if let Some(cap) = regex_top_level.captures(line) {
-            let (_, [var, val]) = cap.extract();
-            if let Some(arg) = get_lua_val(val) {
-                if var == "SCRIPT_VERSION"
-                    && let LuaValue::Integer(s) = &arg
-                {
-                    script_version = *s;
-                    func_report
-                        .entry(script_version)
-                        .or_insert_with(|| HashMap::new());
-                }
-                state.self_var_map.insert(var.to_string(), arg);
-            }
-        }
-    }
-
     for (k, v) in dialogue_dict {
         state
             .self_var_map
@@ -300,6 +309,102 @@ pub fn process(
     }
 
     for line in lines {
+        if let Some(cap) = regex_top_level.captures(line) {
+            let (_, [var, val]) = cap.extract();
+            if let Some(arg) = get_lua_val(val) {
+                if var == "SCRIPT_VERSION"
+                    && let LuaValue::Integer(s) = &arg
+                {
+                    script_version = *s;
+                    func_report
+                        .entry(script_version)
+                        .or_insert_with(|| HashMap::new());
+                }
+                state.self_var_map.insert(var.to_string(), arg);
+            }
+        } else if let Some(cap) = regex_start_item_block.captures(line) {
+            let listener_id_s = &cap["listener_id"];
+            item_listener_id = if let Ok(i) = listener_id_s.parse::<i32>() {
+                i
+            } else if let Some(LuaValue::Integer(it)) =
+                get_self_var_value(&state, &Some(listener_id_s.to_string()))
+            {
+                it
+            } else {
+                continue;
+            };
+
+            inside_item_block = true;
+        } else if let Some(cap) = regex_item_check.captures(line) {
+            let item_name_s = &cap["item_name"];
+            let count_s = &cap["item_count"];
+            let is_hq_s = &cap["item_is_hq"];
+            let item_name_index = if let Ok(i) = item_name_s.parse::<i32>() {
+                i
+            } else if let Some(LuaValue::Integer(it)) =
+                get_self_var_value(&state, &Some(item_name_s.to_string()))
+            {
+                it
+            } else {
+                continue;
+            };
+            let Ok(count_i) = count_s.parse::<i32>() else {
+                continue;
+            };
+            let is_hq = is_hq_s == "true";
+            let idtl = ItemDetail::new(item_name_index, count_i, is_hq);
+            temp_item_map
+                .entry((idtl.item_id, idtl.is_hq))
+                .and_modify(|entry: &mut ItemDetail| entry.count += idtl.count)
+                .or_insert(idtl);
+        } else if inside_item_block && line.trim() == "end" {
+            inside_item_block = false;
+            if temp_item_map.len() > 0 {
+                let mut temp_item_str_list = Vec::new();
+                for (_, v) in &temp_item_map {
+                    let Ok(Some(item_desc)) =
+                        database.get_item_qty_desc(v.item_id, v.count, v.is_hq, 0)
+                    else {
+                        continue;
+                    };
+                    temp_item_str_list.push(item_desc);
+                }
+                let combined = match temp_item_str_list.len() {
+                    1 => temp_item_str_list[0].to_string(),
+                    2 => format!("{} and {}", temp_item_str_list[0], temp_item_str_list[1]),
+                    _ => {
+                        let first_part =
+                            temp_item_str_list[..temp_item_str_list.len() - 1].join(", ");
+                        format!(
+                            "{}, and {}",
+                            first_part,
+                            temp_item_str_list[temp_item_str_list.len() - 1]
+                        )
+                    }
+                };
+                let statement = format!("''The player hands over {combined}.''");
+                // output.push(statement.clone());
+                listener_to_item
+                    .entry(item_listener_id)
+                    .and_modify(|list: &mut Vec<String>| list.push(statement.clone()))
+                    .or_insert(vec![statement.clone()]);
+                temp_item_map.clear();
+                item_listener_id = 0;
+            }
+        }
+    }
+
+    for (k, v) in &listener_to_item {
+        let listener = match database.get_event_npc(*k) {
+            Ok(Some(s)) => s,
+            _ => k.to_string(),
+        };
+        for item_line in v {
+            output.push(format!("{listener}: {item_line}"));
+        }
+    }
+
+    for line in lines {
         if line.starts_with("--") || line.starts_with("print(") {
             continue;
         }
@@ -310,9 +415,10 @@ pub fn process(
         if line == "end" {
             if skip_to_end {
                 skip_to_end = false;
+            } else {
+                output.push(format!("{}", line.clone()));
+                output.push(String::new());
             }
-            output.push(format!("{}", line.clone()));
-            output.push(String::new());
             continue;
         } else if skip_to_end {
             continue;
@@ -326,6 +432,10 @@ pub fn process(
             }
             if let Some(cap) = regex_top_level.captures(line) {
                 let (_, [var, _]) = cap.extract();
+                if !is_all_script_instruction && FUNCTION_SKIP_LOOKUP.contains(var) {
+                    skip_to_end = true;
+                    continue;
+                }
                 if let Some(val) = state.self_var_map.get(var)
                     && let LuaValue::Function(func) = val
                 {
