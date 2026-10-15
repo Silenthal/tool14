@@ -286,7 +286,7 @@ pub fn process(
     let mut inside_item_block = false;
     let mut inside_label_func = false;
     let mut inside_label_func_name = String::new();
-    let mut temp_item_map = HashMap::new();
+    let mut temp_item_map: Vec<ItemDetail> = Vec::new();
     let mut temp_text_list = Vec::new();
 
     if quest.listener_start != "" {
@@ -327,7 +327,7 @@ pub fn process(
 
     for line in lines {
         if inside_label_func && let Some(cap) = regex_assign.captures(line) {
-            let (_, [var, val]) = cap.extract();
+            let (_, [_, val]) = cap.extract();
             temp_text_list.push(val.to_string());
         } else if inside_label_func && line == "end" {
             inside_label_func = false;
@@ -385,15 +385,23 @@ pub fn process(
             };
             let is_hq = is_hq_s == "true";
             let idtl = ItemDetail::new(item_name_index, count_i, is_hq);
-            temp_item_map
-                .entry((idtl.item_id, idtl.is_hq))
-                .and_modify(|entry: &mut ItemDetail| entry.count += idtl.count)
-                .or_insert(idtl);
+            if let Some(entry) = temp_item_map
+                .iter_mut()
+                .find(|e| (e.item_id, e.is_hq) == (idtl.item_id, idtl.is_hq))
+            {
+                entry.count += idtl.count
+            } else {
+                temp_item_map.push(idtl);
+            }
+            // temp_item_map
+            //     .entry((idtl.item_id, idtl.is_hq))
+            //     .and_modify(|entry: &mut ItemDetail| entry.count += idtl.count)
+            //     .or_insert(idtl);
         } else if inside_item_block && line.trim() == "end" {
             inside_item_block = false;
             if temp_item_map.len() > 0 {
                 let mut temp_item_str_list = Vec::new();
-                for (_, v) in &temp_item_map {
+                for v in &temp_item_map {
                     let Ok(Some(item_desc)) =
                         database.get_item_qty_desc(v.item_id, v.count, v.is_hq, 0)
                     else {
@@ -525,15 +533,6 @@ pub fn process(
         temp_line = regex_unpack
             .replace_all(&temp_line, |cap: &regex::Captures| {
                 let var_name = &cap["table_var"];
-                // if let Some(LuaValue::Table(x)) = state.local_var_map.get(var_name) {
-                //     if x.len() == 0 {
-                //         "{}".to_string()
-                //     } else {
-                //         format!("{}", x.join(", ").trim())
-                //     }
-                // } else {
-                //     cap[0].to_string()
-                // }
                 let pre = cap[0].to_string();
                 let rep = format!("unpack!{}", var_name);
                 temp_transform.push((pre, rep));
@@ -578,14 +577,19 @@ pub fn process(
                 for index in 0..variable_list.len() {
                     let var = variable_list.get(index).unwrap().clone();
                     let val = value_list.get(index).unwrap().clone();
-                    if let Some(lv) = eval_func(database, &state, &val)? {
+
+                    if val == "target"
+                        && let Some(n) = target_name
+                    {
+                        state.local_var_map.insert(var, LuaValue::String(n.clone()));
+                    } else if let Some(lv) = eval_func(database, &state, &val)? {
                         state.local_var_map.insert(var, lv);
                     }
                 }
             }
         }
 
-        let replace_res = regex_call.replace_all(&temp_line, |cap: &regex::Captures| {
+        let replace_res: std::borrow::Cow<'_, str> = regex_call.replace_all(&temp_line, |cap: &regex::Captures| {
             let (_, [var_caller, func, args]) = cap.extract();
             if !state.self_var_map.contains_key(func){
                 func_report
@@ -599,7 +603,6 @@ pub fn process(
             }
             let temp_arg_list = args.split(", ").map(|x| x.trim().to_string());
             let mut arg_list_ls = Vec::new();
-            let mut ups = false;
             for arg in temp_arg_list{
                 // TODO: Here
                 if arg.starts_with("unpack!"){
@@ -610,7 +613,6 @@ pub fn process(
                         } else {
                             for a in x{
                                 arg_list_ls.push(a.clone());
-                                ups = true;
                             }
                         }
                     } else {
@@ -1206,7 +1208,15 @@ pub fn process(
                 pv = Some(s);
             }
             if let Some(param_val) = pv {
-                replaces.push((format!("self.{param}"), param_val.to_string()));
+                // Guess: if a number is in the range of a listener id, maybe it is a listener id
+                let mut rep = param_val.to_string();
+                if *param_val >= 1000000
+                    && *param_val < 2000000
+                    && let Ok(Some(listener)) = database.get_name_from_id(*param_val)
+                {
+                    rep = format!("\"{listener}\"");
+                }
+                replaces.push((format!("self.{param}"), rep));
             }
         }
         for (from, to) in &replaces {
@@ -1333,7 +1343,15 @@ fn get_self_var_value(state: &State, key_opt: &Option<String>) -> Option<LuaValu
 fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<LuaValue>> {
     let regex_call = Regex::new(r"\s*(\w+):(\w+)\(([^\)]*)\)")?;
     if let Ok(val_i) = val.parse() {
-        Ok(Some(LuaValue::Integer(val_i)))
+        // Guess: if a number is in the range of a listener id, maybe it is a listener id
+        if val_i >= 1000000
+            && val_i < 2000000
+            && let Ok(Some(listener)) = database.get_name_from_id(val_i)
+        {
+            Ok(Some(LuaValue::String(listener)))
+        } else {
+            Ok(Some(LuaValue::Integer(val_i)))
+        }
     }
     // else if let Ok(val_f) = val.parse() {
     //     Ok(Some(LuaValue::Float(val_f)))
@@ -1408,7 +1426,19 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
             _ => Ok(None),
         }
     } else if let Some(v) = get_self_var_value(state, &Some(val.to_string())) {
-        Ok(Some(v))
+        if let LuaValue::Integer(val_i) = v {
+            // Guess: if a number is in the range of a listener id, maybe it is a listener id
+            if val_i >= 1000000
+                && val_i < 2000000
+                && let Ok(Some(listener)) = database.get_name_from_id(val_i)
+            {
+                Ok(Some(LuaValue::String(listener)))
+            } else {
+                Ok(Some(LuaValue::Integer(val_i)))
+            }
+        } else {
+            Ok(Some(v))
+        }
     } else {
         Ok(None)
     }
