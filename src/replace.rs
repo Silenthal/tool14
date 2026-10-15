@@ -27,7 +27,7 @@ enum LuaValue {
     // Float(f64), // Not handling these currently
     String(String),
     Function(LuaFunction),
-    // Table(String), // Not handling these currently
+    Table(Vec<String>),
 }
 
 struct State<'a> {
@@ -222,11 +222,23 @@ const FUNCTION_SKIP: &[&str] = &[
     "SCRIPT_VERSION",
     "IsAnnounce",
     "IsAcceptEvent",
+    "PLANDEF_GetMenuTextLabels",
+    "GetMenuTextLabels",
 ];
 
 static FUNCTION_SKIP_LOOKUP: LazyLock<HashSet<String>> = LazyLock::new(|| {
     let mut s = HashSet::new();
     for x in FUNCTION_SKIP {
+        s.insert(x.to_string());
+    }
+    s
+});
+
+const LABEL_FUNC: &[&str] = &["PLANDEF_GetMenuTextLabels", "GetMenuTextLabels"];
+
+static LABEL_FUNC_LOOKUP: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    let mut s = HashSet::new();
+    for x in LABEL_FUNC {
         s.insert(x.to_string());
     }
     s
@@ -252,6 +264,8 @@ pub fn process(
         r"(\w+)\[(?<out_index>\d+)\] = \{\s*(?<item_name>[\w\.]+),\s*(?<item_count>\w+),\s*(?<item_is_hq>\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+)\s*\}",
     )?;
     let regex_start_item_block = Regex::new(r"([\w\.]+) == (?<listener_id>[\w\.]+) then$")?;
+    let regex_unpack = Regex::new(r"unpack\((?<table_var>v\w+)\)")?;
+    let regex_table_insert = Regex::new(r"table\.insert\(([\w]+), ([\w\.]+)(\[[\w\.]+\])?\)")?;
     let mut listener_to_item = HashMap::new();
     let mut item_listener_id = 0;
     let mut output: Vec<String> = Vec::new();
@@ -270,7 +284,10 @@ pub fn process(
     let mut trim_after = false;
     let mut script_version: i32 = 0;
     let mut inside_item_block = false;
+    let mut inside_label_func = false;
+    let mut inside_label_func_name = String::new();
     let mut temp_item_map = HashMap::new();
+    let mut temp_text_list = Vec::new();
 
     if quest.listener_start != "" {
         state.listener_key_to_name.insert(
@@ -309,9 +326,24 @@ pub fn process(
     }
 
     for line in lines {
-        if let Some(cap) = regex_top_level.captures(line) {
+        if inside_label_func && let Some(cap) = regex_assign.captures(line) {
             let (_, [var, val]) = cap.extract();
-            if let Some(arg) = get_lua_val(val) {
+            temp_text_list.push(val.to_string());
+        } else if inside_label_func && line == "end" {
+            inside_label_func = false;
+            state.self_var_map.insert(
+                inside_label_func_name,
+                LuaValue::Table(temp_text_list.clone()),
+            );
+            temp_text_list.clear();
+            inside_label_func_name = String::new();
+        } else if let Some(cap) = regex_top_level.captures(line) {
+            let (_, [var, val]) = cap.extract();
+            if LABEL_FUNC_LOOKUP.contains(var) {
+                inside_label_func = true;
+                inside_label_func_name = var.to_string();
+                continue;
+            } else if let Some(arg) = get_lua_val(val) {
                 if var == "SCRIPT_VERSION"
                     && let LuaValue::Integer(s) = &arg
                 {
@@ -450,14 +482,99 @@ pub fn process(
             output.push(line.clone());
             continue;
         }
+
+        if let Some(cap) = regex_table_insert.captures(line) {
+            let table_var = &cap[1];
+            let assigned = &cap[2];
+            let list_opt =
+                if let Some(LuaValue::Table(x)) = state.local_var_map.get(&table_var.to_string()) {
+                    Some(x.clone())
+                } else {
+                    None
+                };
+
+            if let Some(mut list) = list_opt {
+                if assigned.starts_with("self.") && !list.contains(&assigned.to_string()) {
+                    list.push(assigned.to_string());
+                }
+                if let Some(lv) = state.local_var_map.get(assigned) {
+                    match lv {
+                        LuaValue::Table(other) => {
+                            for val in other {
+                                if !list.contains(val) {
+                                    list.push(val.clone());
+                                }
+                            }
+                        }
+                        LuaValue::String(s) => {
+                            list.push(s.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                state
+                    .local_var_map
+                    .insert(table_var.to_string(), LuaValue::Table(list));
+            } else {
+                break;
+            }
+        }
         let mut temp_line = line.clone();
+        let mut temp_transform = Vec::new();
         let mut replaces = Vec::new();
+        temp_line = regex_unpack
+            .replace_all(&temp_line, |cap: &regex::Captures| {
+                let var_name = &cap["table_var"];
+                // if let Some(LuaValue::Table(x)) = state.local_var_map.get(var_name) {
+                //     if x.len() == 0 {
+                //         "{}".to_string()
+                //     } else {
+                //         format!("{}", x.join(", ").trim())
+                //     }
+                // } else {
+                //     cap[0].to_string()
+                // }
+                let pre = cap[0].to_string();
+                let rep = format!("unpack!{}", var_name);
+                temp_transform.push((pre, rep));
+                format!("unpack!{}", var_name)
+            })
+            .to_string();
         if let Some(cap) = regex_assign.captures(&temp_line) {
             let (_, [vars, vals]) = cap.extract();
+
             let variable_list: Vec<String> =
-                vars.split("; ").map(|x| x.trim().to_string()).collect();
-            let value_list: Vec<String> = vals.split("; ").map(|x| x.trim().to_string()).collect();
-            if variable_list.len() == value_list.len() {
+                vars.split("λ ").map(|x| x.trim().to_string()).collect();
+            let mut value_list: Vec<String> =
+                vals.split("λ ").map(|x| x.trim().to_string()).collect();
+            let val_check = if value_list.len() == 1 {
+                let pre = value_list[0]
+                    .strip_prefix("self:")
+                    .and_then(|s| Some(s.to_string()))
+                    .unwrap_or(value_list[0].to_string());
+                let post = pre
+                    .strip_suffix("()")
+                    .and_then(|s| Some(s.to_string()))
+                    .unwrap_or(pre.clone());
+                post.to_string()
+            } else {
+                String::new()
+            };
+            if value_list.len() == 1 && LABEL_FUNC_LOOKUP.contains(&val_check) {
+                let Some(ff) = state.self_var_map.get(&val_check) else {
+                    break;
+                };
+                let LuaValue::Table(table) = ff else {
+                    break;
+                };
+                if table.len() > 0 {
+                    value_list.clear();
+                    for val in table {
+                        value_list.push(val.clone());
+                    }
+                }
+            }
+            if variable_list.len() <= value_list.len() {
                 for index in 0..variable_list.len() {
                     let var = variable_list.get(index).unwrap().clone();
                     let val = value_list.get(index).unwrap().clone();
@@ -480,9 +597,32 @@ pub fn process(
                     .or_insert(1);
                 });
             }
+            let temp_arg_list = args.split(", ").map(|x| x.trim().to_string());
+            let mut arg_list_ls = Vec::new();
+            let mut ups = false;
+            for arg in temp_arg_list{
+                // TODO: Here
+                if arg.starts_with("unpack!"){
+                    let strip_arg = arg.strip_prefix("unpack!").unwrap();
+                    if let Some(LuaValue::Table(x)) = state.local_var_map.get(strip_arg) {
+                        if x.len() == 0 {
+                            arg_list_ls.push(format!("unpack({})", strip_arg));
+                        } else {
+                            for a in x{
+                                arg_list_ls.push(a.clone());
+                                ups = true;
+                            }
+                        }
+                    } else {
+                        arg_list_ls.push(arg);
+                    }
+                } else {
+                    arg_list_ls.push(arg);
+                }
+            }
             match func {
                 "Talk" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let _ = arg_list.next(); // player
                     let _ = arg_list.next(); // target
                     let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
@@ -556,7 +696,7 @@ pub fn process(
                     }
                 }
                 "TalkAsync" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let _ = arg_list.next(); // player
                     let _ = arg_list.next(); // target
                     let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
@@ -629,7 +769,7 @@ pub fn process(
                     }
                 }
                 "ShortTalk" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let _ = arg_list.next(); // target
                     let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
                     let _ = arg_list.next(); // design
@@ -700,7 +840,7 @@ pub fn process(
                     }
                 }
                 "ShortTalkWithLineVoice" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let _ = arg_list.next(); // target
                     let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
                     let _ = arg_list.next(); // design
@@ -772,7 +912,7 @@ pub fn process(
                     }
                 }
                 "BalloonTalk" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let _ = arg_list.next(); // player
                     let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
                     let _ = arg_list.next(); // time
@@ -841,7 +981,7 @@ pub fn process(
                     }
                 }
                 "SystemTalk" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
                     let _ = arg_list.next(); // true to close dialog box
                     // let local_dialogue_args: Vec<String> = arg_list.collect();
@@ -862,20 +1002,21 @@ pub fn process(
                         cap[0].to_string()
                     }
                 }
-                "Menu" | "GimmickMenu" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                "Menu" | "GimmickMenu" | "ResultMenu" => {
+                    let mut arg_list = arg_list_ls.into_iter();
                     let question_opt = get_self_var_name(&arg_list.next()); // actual line
                     let final_dialogue_line: String;
-                    let Some(LuaValue::String(question)) =
-                        get_self_var_value(&state, &question_opt)
+                    let Ok(Some(LuaValue::String(question))) =
+                        eval_func(&database, &state, &question_opt.unwrap())
                     else {
                         return cap[0].to_string();
                     };
                     let mut line_list = vec![format!("Question: {question}")];
                     for answers in arg_list {
                         if let Some(answer_key) = get_self_var_name(&Some(answers)) {
+                            let lookup = get_self_var_value(&state, &Some(answer_key.clone()));
                             if let Some(LuaValue::String(answer_s)) =
-                                get_self_var_value(&state, &Some(answer_key))
+                                lookup
                             {
                                 line_list.push(format!("> {answer_s}"));
                             }
@@ -885,7 +1026,7 @@ pub fn process(
                     format!("{}\n\n{final_dialogue_line}\n", cap[0].to_string())
                 }
                 "YesNo" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let question_opt = get_self_var_name(&arg_list.next()); // actual line
                     let final_dialogue_line: String;
                     let Some(LuaValue::String(question)) =
@@ -898,7 +1039,7 @@ pub fn process(
                 }
                 "YesNoQuestBattle" => {
                     // Note: only works for below 200 - tables InstanceContent and InstanceContentTextData have text with no NPCs attached
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let question_opt = get_self_var_value(&state, &arg_list.next());
                     if let Some(LuaValue::Integer(i)) = &question_opt && let Some(qb) = database.get_quest_battle(*i).ok().flatten() {
                         let mut temp = vec![cap[0].to_string()];
@@ -929,7 +1070,7 @@ pub fn process(
                     }
                 }
                 "PlayCutScene" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let log_key_opt = get_self_var_value(&state, &arg_list.next());
                     let Some(LuaValue::Integer(cut_index)) = log_key_opt else{
                         return cap[0].to_string();
@@ -951,7 +1092,7 @@ pub fn process(
                     format!("{}{}", prefix, dialogue_str)
                 }
                 "LogMessage" | "ScenarioMessage" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let log_key_opt = get_self_var_value(&state, &arg_list.next());
                     // let local_dialogue_args: Vec<String> = arg_list.collect();
                     let line_val = match log_key_opt{
@@ -978,7 +1119,7 @@ pub fn process(
                     format!("{prefix}\nPopup: {final_dialogue_line}\n")
                 }
                 "IsQuestAccepted" | "IsQuestCompleted" | "GetQuestSequence" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let quest_link_opt = arg_list.next();
                     if let Some(LuaValue::Integer(index)) =
                         get_self_var_value(&state, &quest_link_opt)
@@ -990,7 +1131,7 @@ pub fn process(
                     }
                 }
                 "PlayBGM" => {
-                    let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
+                    let mut arg_list = arg_list_ls.into_iter();
                     let bgm_link_opt = arg_list.next();
                     trim_after = !is_all_script_instruction;
                     let prefix = if is_all_script_instruction {
@@ -1074,6 +1215,9 @@ pub fn process(
 
         // HACK: Changing 'λ' back to ','
         temp_line = temp_line.replace('λ', ",");
+        for (pre, rep) in temp_transform {
+            temp_line = temp_line.replace(&rep, &pre);
+        }
         if temp_line != "" {
             output.push(temp_line);
         }
@@ -1168,13 +1312,18 @@ fn get_self_var_value(state: &State, key_opt: &Option<String>) -> Option<LuaValu
     if let Some(key) = get_self_var_name(key_opt) {
         if let Ok(f) = key.parse::<i32>() {
             return Some(LuaValue::Integer(f));
-        }
-        if let Some(s) = state.self_var_map.get(&key) {
+        } else if key.starts_with("\"") && key.ends_with("\"") {
+            return Some(LuaValue::String(
+                key.strip_circumfix("\"", "\"").unwrap().to_string(),
+            ));
+        } else if let Some(s) = state.self_var_map.get(&key) {
+            return Some(s.clone());
+        } else if let Some(s) = state.local_var_map.get(&key) {
             return Some(s.clone());
         } else if let Some(s) = state.database.quest_sys_define_map.get(&key) {
             return Some(LuaValue::Integer(*s));
         } else {
-            None
+            return Some(LuaValue::String(key));
         }
     } else {
         None
@@ -1204,18 +1353,27 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
             args: arg_list,
             // var_map: HashMap::new(),
         })))
-    }
-    // else if val.starts_with("{") && val.starts_with("}")
-    // {
-    //     Ok(Some(LuaValue::Table(val.to_string())))
-    // }
-    else if val == "nil" {
+    } else if val.starts_with("{") && val.ends_with("}") {
+        let inner = val
+            .strip_prefix('{')
+            .and_then(|v| v.strip_suffix('}'))
+            .unwrap_or_default()
+            .trim();
+        if inner == "" {
+            return Ok(Some(LuaValue::Table(Vec::new())));
+        }
+        let split = inner
+            .split(", ")
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<String>>();
+        Ok(Some(LuaValue::Table(split)))
+    } else if val == "nil" {
         Ok(Some(LuaValue::Nil))
     } else if let Some(cap) = regex_call.captures(val) {
         let (_, [_, func, args]) = cap.extract();
+        let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
         match func {
             "BindCharacter" => {
-                let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
                 let level_link_opt = arg_list.next();
                 if let Some(level_link_s) = &level_link_opt
                     && let Ok(level_i) = level_link_s.parse::<i32>()
@@ -1232,9 +1390,7 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
                 }
             }
             "CreateCharacter" => {
-                let mut arg_list = args.split(", ").map(|x| x.trim().to_string());
                 let listener_link_opt = arg_list.next();
-
                 if let Some(listener_link_s) = &listener_link_opt
                     && let Ok(listener_i) = listener_link_s.parse::<i32>()
                     && let Some(npc_name) = database.get_name_from_id(listener_i)?
@@ -1251,6 +1407,8 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
             }
             _ => Ok(None),
         }
+    } else if let Some(v) = get_self_var_value(state, &Some(val.to_string())) {
+        Ok(Some(v))
     } else {
         Ok(None)
     }
