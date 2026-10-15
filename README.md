@@ -54,6 +54,8 @@ Program options:
           All or part of the name of the quest
   -p, --ffxiv-install-path <FFXIV_INSTALL_PATH>
           The path to the FFXIV installation folder. Saves to config after program exits
+  -f, --quest-id-file <QUEST_ID_FILE>
+          A file containing a list of quest IDs or numbers, one per line
   -h, --help
           Print help
 ```

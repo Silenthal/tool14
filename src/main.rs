@@ -3,7 +3,8 @@ use clap::{CommandFactory, Parser};
 use regex::Regex;
 use std::{
     collections::HashMap,
-    fs::{self},
+    fs::{self, File},
+    io::{BufRead, BufReader},
     path::PathBuf,
     sync::Arc,
 };
@@ -59,6 +60,10 @@ struct Args {
     /// The path to the FFXIV installation folder. Saves to config after program exits.
     #[arg(short = 'p', long)]
     ffxiv_install_path: Option<String>,
+
+    /// A file containing a list of quest IDs or numbers, one per line.
+    #[arg(short = 'f', long)]
+    quest_id_file: Option<String>,
 }
 
 fn print_quest(
@@ -176,6 +181,36 @@ fn read_all(database: &Database, ironworks: &Ironworks, excel: &Excel, args: &Ar
     Ok(())
 }
 
+fn read_multiple(
+    database: &Database,
+    ironworks: &Ironworks,
+    excel: &Excel,
+    args: &Args,
+    id_list: &Vec<i32>,
+) -> Result<()> {
+    let output_path_mult = PathBuf::from("output");
+    let mut func_report: HashMap<i32, HashMap<String, i32>> = HashMap::new();
+    for i in id_list {
+        let Some(quest) = database.get_quest(*i)? else {
+            continue;
+        };
+        if quest.quest_id.len() != 15 {
+            println!("Skipping quest {} \"{}\"", quest.number, quest.quest_id);
+            continue;
+        }
+        println!("Processing quest {}", quest.number);
+        let output_path_specific =
+            output_path_mult.join(format!("{} - {}.txt", quest.number, quest.quest_id));
+        let output = print_quest(database, ironworks, excel, &quest, args, &mut func_report)?;
+        if let Some(parent) = output_path_specific.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Unable to create out directory at {:?}", parent))?;
+        }
+        fs::write(output_path_specific, output)?;
+    }
+    Ok(())
+}
+
 fn read_single(
     output_path_opt: Option<&String>,
     quest: &Quest,
@@ -228,7 +263,40 @@ fn main() -> Result<()> {
 
     let mut quest_opt: Option<Quest> = None;
     let mut quest_list = Vec::new();
-    if let Some(name) = &args.quest_name {
+    let mut is_multiple = false;
+    let mut idList = Vec::new();
+
+    if let Some(arg_list) = &args.quest_id_file {
+        let p = PathBuf::from(arg_list);
+        if !p.exists() {
+            return Err(anyhow!(
+                "Unable to find quest ID argument file '{arg_list}'"
+            ));
+        }
+        let arg_file = File::open(p)?;
+        let reader = BufReader::new(arg_file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.len() == 5
+                && let Ok(num) = line.parse::<i32>()
+            {
+                let ql = database.get_matching_quests_by_number(num)?;
+                if ql.len() == 0 {
+                    println!("Warning: unable to find quests for number {num}")
+                } else {
+                    idList.extend(ql.iter().map(|a| a.0));
+                }
+            } else if line.len() > 0 {
+                let ql = database.get_matching_quests_by_id(&line)?;
+                if ql.len() == 0 {
+                    println!("Warning: unable to find quests for ID {line}")
+                } else {
+                    idList.extend(ql.iter().map(|a| a.0));
+                }
+            }
+        }
+        is_multiple = true;
+    } else if let Some(name) = &args.quest_name {
         quest_list.extend(database.get_matching_quests_by_title(&name)?);
     } else if let Some(num) = args.quest_number {
         quest_list.extend(database.get_matching_quests_by_number(num)?);
@@ -239,7 +307,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if !args.read_all {
+    if !is_multiple && !args.read_all {
         if quest_list.len() == 0 {
             println!("No quests found with the provided ID.");
             return Ok(());
@@ -277,7 +345,9 @@ fn main() -> Result<()> {
         }
     }
 
-    if args.read_all {
+    if is_multiple {
+        read_multiple(&database, &ironworks, &excel, &args, &idList)?;
+    } else if args.read_all {
         read_all(&database, &ironworks, &excel, &args)?;
     } else if let Some(quest) = quest_opt {
         read_single(
