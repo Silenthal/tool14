@@ -23,8 +23,12 @@ use ironworks::{
     excel::Excel,
     sqpack::{Install, SqPack},
 };
+mod detail_level;
 
-use crate::{database::Database, luadec::chunk, model::quest::Quest, settings::Settings};
+use crate::{
+    database::Database, detail_level::DetailLevel, luadec::chunk, model::quest::Quest,
+    settings::Settings,
+};
 
 #[derive(Parser, Debug)]
 #[command(about = "Extract quest dialogue.")]
@@ -37,9 +41,12 @@ struct Args {
     #[arg(short = 'a', long)]
     read_all: bool,
 
-    /// True to print all script instructions.
+    /// The detail level of the file.
+    /// 1 = dialogue lines only (default)
+    /// 2 = dialogue lines with some Lua script
+    /// 3 = dialogue lines with all Lua script lines
     #[arg(short = 's', long)]
-    include_full_script: bool,
+    detail_level: Option<i32>,
 
     /// The name of the file to write the dialogue to.
     #[arg(short, long)]
@@ -80,6 +87,10 @@ fn print_quest(
             quest.number
         ));
     }
+    let detail_level: DetailLevel = match args.detail_level {
+        Some(i) => i.into(),
+        None => DetailLevel::NoScript,
+    };
     let mut output: String = String::new();
     let folder = &quest.quest_id[10..13];
     let script_path = format!("game_script/quest/{}/{}.luab", folder, quest.quest_id);
@@ -89,40 +100,46 @@ fn print_quest(
     let dialogue_map = database
         .get_quest_text_map(&excel, &quest.quest_id)
         .with_context(|| anyhow!("Unable to find path for {}, skipping", quest.quest_id))?;
-    output.push_str(format!("# {}: {}\n", quest.number, quest.name).as_str());
-    output.push_str(format!("- Quest ID: {}\n", quest.quest_id).as_str());
-    output.push_str(format!("- Genre: {}\n", quest.genre).as_str());
-    output.push_str(format!("- Category: {}\n", quest.category).as_str());
-    output.push_str(format!("- Section: {}\n", quest.section).as_str());
-    output.push_str(format!("- Listener Start: {}\n", quest.listener_start).as_str());
-    output.push_str(format!("- Listener End: {}\n", quest.listener_end).as_str());
-    output.push_str(format!("- Required Level: {}\n", quest.required_level).as_str());
-    if quest.required_job != "" {
-        output.push_str(format!("- Required Job: {}\n", quest.required_job).as_str());
-    }
-    output.push_str(format!("- Required Quests: {}\n", quest.required_quests.join(", ")).as_str());
-    if quest.quest_rewards.len() > 0 {
-        output.push_str(format!("- Rewards: {}\n", quest.quest_rewards.join(", ")).as_str());
-    }
-    if quest.quest_option_rewards.len() > 0 {
+    if detail_level != DetailLevel::NoScript {
+        output.push_str(format!("# {}: {}\n", quest.number, quest.name).as_str());
+        output.push_str(format!("- Quest ID: {}\n", quest.quest_id).as_str());
+        output.push_str(format!("- Genre: {}\n", quest.genre).as_str());
+        output.push_str(format!("- Category: {}\n", quest.category).as_str());
+        output.push_str(format!("- Section: {}\n", quest.section).as_str());
+        output.push_str(format!("- Listener Start: {}\n", quest.listener_start).as_str());
+        output.push_str(format!("- Listener End: {}\n", quest.listener_end).as_str());
+        output.push_str(format!("- Required Level: {}\n", quest.required_level).as_str());
+        if quest.required_job != "" {
+            output.push_str(format!("- Required Job: {}\n", quest.required_job).as_str());
+        }
         output.push_str(
-            format!(
-                "- Reward Choice: {}\n",
-                quest.quest_option_rewards.join(", ")
-            )
-            .as_str(),
+            format!("- Required Quests: {}\n", quest.required_quests.join(", ")).as_str(),
         );
+        if quest.quest_rewards.len() > 0 {
+            output.push_str(format!("- Rewards: {}\n", quest.quest_rewards.join(", ")).as_str());
+        }
+        if quest.quest_option_rewards.len() > 0 {
+            output.push_str(
+                format!(
+                    "- Reward Choice: {}\n",
+                    quest.quest_option_rewards.join(", ")
+                )
+                .as_str(),
+            );
+        }
+        if script.disassembled > 0 {
+            output
+                .push_str(format!("--Functions not decompiled: {}", script.disassembled).as_str());
+        }
+        for listener in &quest.quest_listeners {
+            output.push_str(format!("- {listener}\n").as_str());
+        }
+        for todo in &quest.quest_todo {
+            output.push_str(format!("{todo:?}\n").as_str());
+        }
+        output.push_str("\n");
     }
-    if script.disassembled > 0 {
-        output.push_str(format!("--Functions not decompiled: {}", script.disassembled).as_str());
-    }
-    for listener in &quest.quest_listeners {
-        output.push_str(format!("- {listener}\n").as_str());
-    }
-    for todo in &quest.quest_todo {
-        output.push_str(format!("{todo:?}\n").as_str());
-    }
-    output.push_str("\n==Dialogue==\n{{Dialogue|<nowiki>\n===Accepting the quest===\n");
+    output.push_str("==Dialogue==\n{{Dialogue|<nowiki>\n===Accepting the quest===\n");
     for i in 0..24 {
         let tag = format!("TEXT_{}_TODO_{i:02}", quest.quest_id.to_uppercase());
         if let Some(rf) = dialogue_map
@@ -143,16 +160,31 @@ fn print_quest(
         &quest,
         &dialogue_map,
         &script.lines,
-        args.include_full_script,
+        detail_level,
         func_report,
     )?;
+    let mut last_was_newline = false;
     for line in lines {
-        output.push_str(&format!("{}\n", line));
+        let is_newline = line.trim().is_empty();
+
+        if is_newline {
+            if !last_was_newline {
+                output.push_str(&format!("{}\n", line));
+                last_was_newline = true;
+            }
+        } else {
+            output.push_str(&format!("{}\n", line));
+            last_was_newline = false;
+        }
     }
-    output.push_str("\n</nowiki>}}\n");
+    output.push_str("</nowiki>}}\n");
     let regex_replace_list: Vec<(Regex, &str)> = vec![
+        (Regex::new(r"\t")?, "    "),
         (Regex::new(r".* = function(.*)\nend\n")?, ""),
         (Regex::new(r"\nend\n\n(\n)+")?, "\nend\n\n"),
+        (Regex::new(r"> if.*\n---\n")?, ""),
+        (Regex::new(r"\n\n+")?, "\n\n"),
+        (Regex::new(r"\s+\n")?, "\n"),
     ];
     for (r, replace) in regex_replace_list {
         output = r.replace_all(&output, replace).into_owned();
@@ -264,7 +296,7 @@ fn main() -> Result<()> {
     let mut quest_opt: Option<Quest> = None;
     let mut quest_list = Vec::new();
     let mut is_multiple = false;
-    let mut idList = Vec::new();
+    let mut id_list = Vec::new();
 
     if let Some(arg_list) = &args.quest_id_file {
         let p = PathBuf::from(arg_list);
@@ -284,14 +316,14 @@ fn main() -> Result<()> {
                 if ql.len() == 0 {
                     println!("Warning: unable to find quests for number {num}")
                 } else {
-                    idList.extend(ql.iter().map(|a| a.0));
+                    id_list.extend(ql.iter().map(|a| a.0));
                 }
             } else if line.len() > 0 {
                 let ql = database.get_matching_quests_by_id(&line)?;
                 if ql.len() == 0 {
                     println!("Warning: unable to find quests for ID {line}")
                 } else {
-                    idList.extend(ql.iter().map(|a| a.0));
+                    id_list.extend(ql.iter().map(|a| a.0));
                 }
             }
         }
@@ -346,7 +378,7 @@ fn main() -> Result<()> {
     }
 
     if is_multiple {
-        read_multiple(&database, &ironworks, &excel, &args, &idList)?;
+        read_multiple(&database, &ironworks, &excel, &args, &id_list)?;
     } else if args.read_all {
         read_all(&database, &ironworks, &excel, &args)?;
     } else if let Some(quest) = quest_opt {

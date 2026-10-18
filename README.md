@@ -42,8 +42,8 @@ Program options:
           True to force a database update
   -a, --read-all
           True to read all quests
-  -s, --include-full-script
-          True to print all script instructions
+  -s, --detail-level <DETAIL_LEVEL>
+          The detail level of the file. 1 = dialogue lines only 2 = dialogue lines with some Lua script 3 = dialogue lines with all Lua script lines
   -o, --output <OUTPUT>
           The name of the file to write the dialogue to
   -i, --quest-number <QUEST_NUMBER>

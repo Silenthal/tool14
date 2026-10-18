@@ -307,6 +307,22 @@ impl Database {
         Ok(ret)
     }
 
+    // pub fn get_quest_define_map(&self, index: i32) -> Result<HashMap<String, i32>> {
+    //     let mut res = HashMap::new();
+    //     let mut statement_like = self
+    //         .conn
+    //         .prepare_cached("SELECT Text,DefineValue FROM QuestDefineClient WHERE RowId = ?")?;
+    //     let result_like =
+    //         statement_like.query_map(params![index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+    //     for row in result_like {
+    //         let (key, val) = row?;
+    //         res.insert(key, val);
+    //     }
+
+    //     Ok(res)
+    // }
+
     pub fn get_text_map(&self, excel: &Excel, path: &String) -> Result<HashMap<String, String>> {
         let quest_sheet = excel.sheet(path)?;
         let cols = quest_sheet.columns()?;

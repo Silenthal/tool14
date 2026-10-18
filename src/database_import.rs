@@ -37,6 +37,7 @@ const TABLE_LIST: &[&str] = &[
     "PlaceName",
     "Quest",
     "QuestBattle",
+    // "QuestDefineClient",
     "QuestSetDefine",
     "QuestSystemDefine",
     "Stain",

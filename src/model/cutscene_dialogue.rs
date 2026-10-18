@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    cmp::min,
+    collections::{BTreeMap, HashMap},
+    sync::LazyLock,
+};
 
 use anyhow::{Result, anyhow};
 use binrw::BinRead;
@@ -9,13 +13,14 @@ use ironworks::{
         File,
         cutb::{Cutscene, Node},
         layer::{HelperKind, InstanceData, InstanceKind},
-        tmb::{CommandKind, Condition, Item},
+        tmb::{CommandKind, Condition, Item, Track},
     },
 };
 use regex::Regex;
 
 use crate::{
     database::Database,
+    detail_level::DetailLevel,
     model::{
         camera_binding::create_target_list,
         cutscene::cttl::{CTTL, TLCommand, TLCommandKind, TimelineItem},
@@ -65,7 +70,8 @@ impl CutsceneDialogue {
         &self,
         database: &Database,
         excel: &Excel,
-        print_all_commands: bool,
+        detail_level: DetailLevel,
+        arg_list: &Vec<(String, Option<String>)>,
     ) -> Result<Vec<String>> {
         let Some(Node::Sheet(dialogue_sheet_link)) = self
             .cutscene
@@ -161,6 +167,7 @@ impl CutsceneDialogue {
             }
         }
         let regex_dialogue_alt_speaker = Regex::new(r"^\(-([^-]+)-\).*$")?;
+        let mut temp_info_list = Vec::new();
         for node in self
             .cutscene
             .nodes()
@@ -170,17 +177,22 @@ impl CutsceneDialogue {
             let Node::Timeline(tl) = node else {
                 continue;
             };
-            let mut timeline_dict: BTreeMap<i16, Vec<String>> = BTreeMap::new();
+            temp_info_list.clear();
+            let mut timeline_dict: BTreeMap<i16, Vec<(String, String, String)>> = BTreeMap::new();
             let mut command_dict = BTreeMap::new();
             let mut track_dict = BTreeMap::new();
             let mut actor_dict = BTreeMap::new();
+            let mut timeline_header = String::new();
             let mut condition_str;
             let mut command_str;
             let mut dialogue_str;
             for item in tl.items() {
                 match item {
                     Item::Header(header) => {
-                        info_list.push(format!("\n-- Timeline, duration {}", header.duration()));
+                        if detail_level == DetailLevel::FullScript {
+                            timeline_header =
+                                format!("\n-- Timeline, duration {}", header.duration());
+                        }
                     }
                     Item::Actor(actor) => {
                         actor_dict.insert(actor.id(), actor);
@@ -194,6 +206,7 @@ impl CutsceneDialogue {
                     _ => {}
                 }
             }
+
             for (_, actor) in actor_dict {
                 for (t_id, track) in track_dict
                     .iter()
@@ -203,6 +216,7 @@ impl CutsceneDialogue {
                         .iter()
                         .filter(|(t, _)| track.commands().contains(*t))
                     {
+                        let mut sort_key: u64 = 0;
                         let participant_var = participant_to_var
                             .get(&actor.participant())
                             .unwrap_or(&format!("P_{:08X}", &actor.participant()))
@@ -237,6 +251,9 @@ impl CutsceneDialogue {
                                             .unwrap_or(&final_dialogue_line)
                                             .to_string();
                                     }
+                                    if final_dialogue_line.trim() == "" {
+                                        final_dialogue_line = "<voiced line>".to_string();
+                                    }
                                     dialogue_str = format!(
                                         "{}{}: {}",
                                         final_speaker, alt_name_speaker, final_dialogue_line
@@ -259,7 +276,9 @@ impl CutsceneDialogue {
                                 else {
                                     break;
                                 };
-                                dialogue_str = format!("[BGM: \"{}\"]", bgm_link);
+                                if detail_level != DetailLevel::NoScript {
+                                    dialogue_str = format!("[BGM: \"{}\"]", bgm_link);
+                                }
                             }
                             CommandKind::Unknown { magic, body } if magic == b"C098" => {
                                 if let Some(ex_command) = self.ex_command_dict.get(&command.id())
@@ -297,6 +316,7 @@ impl CutsceneDialogue {
                             format!("    [Track {:03}, time {:>3}] ", t_id, command.time());
                         match &command.kind() {
                             CommandKind::C002(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 let args = vec![format!(
@@ -313,6 +333,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C004(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 let near = cmd.near_plane();
@@ -369,6 +390,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C010(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 let args = vec![format!(
@@ -401,6 +423,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C018(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -412,6 +435,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C019(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -424,6 +448,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C031(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -437,6 +462,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C040(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -448,6 +474,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C048(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -468,6 +495,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C049(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 let mut args = vec![format!(
@@ -500,6 +528,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C063(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 let mut args = vec![format!(
@@ -523,6 +552,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C090(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -534,6 +564,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C093(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -547,6 +578,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C094(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 let filter_str = if let Some(f) = cmd.filter() {
@@ -590,6 +622,7 @@ impl CutsceneDialogue {
                                 );
                             }
                             CommandKind::C114(cmd) => {
+                                sort_key = cmd.unknown_1() as u64;
                                 let unk_lo = cmd.unknown_1() & 0xFFFF;
                                 let unk_hi = (cmd.unknown_1() >> 16) & 0xFFFF;
                                 command_str += &format!(
@@ -646,6 +679,7 @@ impl CutsceneDialogue {
                                     .get(1)
                                     .and_then(|i| Some(i.clone()))
                                     .unwrap_or_default();
+                                sort_key = u1 as u64;
                                 let unk_lo = u1 & 0xFFFF;
                                 let unk_hi = (u1 >> 16) & 0xFFFF;
                                 let tag = String::from_utf8(magic.to_vec()).unwrap_or_default();
@@ -820,59 +854,283 @@ impl CutsceneDialogue {
                             }
                         }
 
-                        let cond_base = track
+                        let cond_base_list = track
                             .condition()
                             .iter()
                             .filter_map(|x| condition_to_text(x))
-                            .collect::<Vec<String>>()
-                            .join(" ");
+                            .collect::<Vec<String>>();
+                        let cond_base;
+                        cond_base = condition_list_narrow(track, arg_list)?.join(" ");
                         if cond_base != "" {
-                            condition_str = format!("[if {cond_base}]");
+                            condition_str = format!("> if {cond_base}");
                         }
 
-                        let mut timeline_str = String::new();
-
-                        if print_all_commands {
-                            if condition_str != "" {
-                                timeline_str += &format!("{}\n    ", condition_str);
-                            }
-                            timeline_str += &command_str;
-                            if dialogue_str != "" {
-                                timeline_str += &format!("\n{}", dialogue_str)
-                            }
-                        } else {
-                            if dialogue_str != "" {
-                                if condition_str != "" {
-                                    timeline_str += &format!("> {}\n", condition_str);
-                                }
-                                timeline_str += &dialogue_str;
-                                if condition_str != "" {
-                                    timeline_str += "\n---";
-                                }
-                            }
-                        }
-                        if timeline_str != "" {
+                        if condition_str != "" || command_str != "" || dialogue_str != "" {
+                            let combo = (condition_str, command_str, dialogue_str);
+                            // sort_key |= ((command.time() as u64) & 0xFFFFFFFF) << 32;
                             timeline_dict
                                 .entry(command.time())
-                                .and_modify(|m| m.push(timeline_str.clone()))
-                                .or_insert(vec![timeline_str.clone()]);
+                                .and_modify(|m| m.push(combo.clone()))
+                                .or_insert(vec![combo]);
                         }
                     }
                 }
             }
-            let mut is_last_blank = info_list
-                .last()
-                .and_then(|s| Some(s.trim() == ""))
-                .unwrap_or(false);
-            for cmd in timeline_dict.values().flatten() {
-                if !(cmd == "\n" && is_last_blank) {
-                    info_list.push(cmd.clone());
-                    is_last_blank = cmd == "\n";
+            let mut last_cond = String::new();
+            for (cond, comm, dial) in timeline_dict.values().flatten() {
+                let include_cond =
+                    detail_level == DetailLevel::FullScript || (cond.len() > 0 && dial != "");
+                if last_cond.len() > 0 && cond == "" {
+                    temp_info_list.push("---".to_string());
+                }
+                if include_cond && cond.len() > 0 {
+                    temp_info_list.push(cond.clone());
+                }
+                if detail_level == DetailLevel::FullScript && comm.len() > 0 {
+                    temp_info_list.push(comm.clone());
+                }
+                if dial.len() > 0 {
+                    temp_info_list.push(dial.clone());
+                }
+                last_cond = if include_cond {
+                    cond.clone()
+                } else {
+                    String::new()
+                };
+            }
+            if last_cond.len() > 0 {
+                temp_info_list.push("---".to_string());
+            }
+            if temp_info_list.len() > 0 {
+                info_list.push(timeline_header);
+                for line in &temp_info_list {
+                    info_list.push(line.clone());
                 }
             }
         }
 
         Ok(info_list)
+    }
+}
+
+fn condition_list_narrow(
+    track: &Track,
+    arg_list: &Vec<(String, Option<String>)>,
+) -> Result<Vec<String>> {
+    let mut output: Vec<String> = Vec::new();
+    let mut temp_list: Vec<String> = Vec::new();
+    let mut output_str: String = String::new();
+    let mut paren_track = 0;
+    for c in track.condition() {
+        match c.operation() {
+            0x1 => {
+                paren_track += 1;
+                output_str.push('(')
+            }
+            0x2 => {
+                if temp_list.len() > 0 {
+                    let pushed;
+                    if temp_list[0].starts_with("var(1")
+                        && let Some(s) = cond_expand(&temp_list, &arg_list)?
+                    {
+                        pushed = s;
+                    } else {
+                        pushed = temp_list.join(" ");
+                    }
+                    output_str.push_str(&pushed);
+                    temp_list.clear();
+                }
+                if paren_track > 0 {
+                    output_str.push(')');
+                    paren_track -= 1;
+                }
+            }
+            0x3..=0xD | 0x11.. => {
+                temp_list.push(condition_to_text(&c).unwrap());
+            }
+            _ => output_str.push_str(&format!(" {} ", condition_to_text(&c).unwrap())),
+        }
+    }
+    if temp_list.len() > 0 {
+        let pushed;
+        if let Some(s) = cond_expand(&temp_list, &arg_list)? {
+            pushed = s;
+        } else {
+            pushed = temp_list.join(" ");
+        }
+        output_str.push_str(&pushed);
+        temp_list.clear();
+    }
+    while paren_track > 0 {
+        output_str.push(')');
+        paren_track -= 1;
+    }
+    output_str = output_str
+        .replace("(1)", "true")
+        .replace("(!1)", "false")
+        .replace("(0)", "false")
+        .replace("(!0)", "true")
+        .replace("(false)", "false")
+        .replace("(true)", "true");
+    if output_str.starts_with("false & ") {
+        output_str = "false".to_string();
+    }
+    if output_str.starts_with("true | ") {
+        output_str = output_str
+            .strip_prefix("true | ")
+            .unwrap_or(&output_str)
+            .to_string();
+    }
+    Ok(vec![output_str])
+}
+
+static REGEX_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"var\((.*), (.*)\)").unwrap());
+
+static CLASSJOB_LIST: &[&str] = &[
+    "adventurer",
+    "gladiator",
+    "pugilist",
+    "marauder",
+    "lancer",
+    "archer",
+    "conjurer",
+    "thaumaturge",
+    "carpenter",
+    "blacksmith",
+    "armorer",
+    "goldsmith",
+    "leatherworker",
+    "weaver",
+    "alchemist",
+    "culinarian",
+    "miner",
+    "botanist",
+    "fisher",
+    "paladin",
+    "monk",
+    "warrior",
+    "dragoon",
+    "bard",
+    "white mage",
+    "black mage",
+    "arcanist",
+    "summoner",
+    "scholar",
+    "rogue",
+    "ninja",
+    "machinist",
+    "dark knight",
+    "astrologian",
+    "samurai",
+    "red mage",
+    "blue mage",
+    "gunbreaker",
+    "dancer",
+    "reaper",
+    "sage",
+    "viper",
+    "pictomancer",
+    "beastmaster",
+];
+
+fn cond_expand(
+    temp_list: &Vec<String>,
+    args: &Vec<(String, Option<String>)>,
+) -> Result<Option<String>> {
+    if temp_list.len() == 3 && temp_list[0].starts_with("var") && REGEX_VAR.is_match(&temp_list[0])
+    {
+        let m = temp_list[0].len() - 1;
+        let first = temp_list[0].clone();
+        let num = first[7..m].parse::<usize>()?;
+        if num < 9 {
+            return Ok(None);
+        }
+        let arg_index = num - 9;
+        let value = temp_list[2].parse::<usize>()?;
+        if num >= 14 {
+            match (num, value) {
+                (14, _) => Ok(Some(format!("dialogue choice {value}"))),
+                (16, 1) | (17, 1) => Ok(Some("player:IsLegacy() == true".to_string())),
+                (16, 0) | (17, 0) => Ok(Some("player:IsLegacy() == false".to_string())),
+                (18, _) => {
+                    if value < CLASSJOB_LIST.len() {
+                        if temp_list[1] == "==" {
+                            Ok(Some(format!(
+                                "player:IsClassJob(\"{}\")",
+                                CLASSJOB_LIST[value]
+                            )))
+                        } else {
+                            Ok(Some(format!(
+                                "!player:IsClassJob(\"{}\")",
+                                CLASSJOB_LIST[value]
+                            )))
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                }
+                _ => Ok(None),
+            }
+        } else {
+            match (temp_list[1].as_str(), value) {
+                ("==", 0) | ("==", 1) | ("!=", 0) | ("!=", 1) => {
+                    let mut is_val_arg = false;
+                    let mut cond = match args.get(arg_index) {
+                        Some((_, Some(s))) => {
+                            if s.contains("GetAnimaWeaponQuestGender") {
+                                is_val_arg = true;
+                            }
+                            s.clone()
+                        }
+                        Some((var_name, None)) => {
+                            if let Ok(num_arg) = var_name.parse::<usize>() {
+                                if temp_list[1] == "==" {
+                                    return Ok(Some((num_arg == value).to_string()));
+                                } else {
+                                    return Ok(Some((num_arg != value).to_string()));
+                                }
+                            }
+                            if var_name.contains("GetAnimaWeaponQuestGender")
+                                | !var_name.contains(":")
+                            {
+                                is_val_arg = true;
+                            }
+                            var_name.clone()
+                        }
+                        _ => {
+                            if arg_index == 0 {
+                                if temp_list[1] == "==" {
+                                    return Ok(Some((0 == value).to_string()));
+                                } else {
+                                    return Ok(Some((0 != value).to_string()));
+                                }
+                            } else {
+                                return Ok(None);
+                            }
+                        }
+                    };
+                    if is_val_arg {
+                        return Ok(Some(format!("{} {} {}", cond, temp_list[1], value)));
+                    } else if value == 0 || (temp_list[1] == "!=" && value == 1) {
+                        if cond.starts_with("!(") && cond.ends_with(")") {
+                            cond = cond[2..cond.len() - 1].to_string();
+                        } else if cond.contains(" and ")
+                            || cond.contains(" or ")
+                            || cond.contains("==")
+                            || cond.contains("~=")
+                        {
+                            cond = format!("!({cond})");
+                        } else {
+                            cond = format!("!{cond}");
+                        }
+                    }
+                    Ok(Some(cond))
+                }
+                _ => Ok(None),
+            }
+        }
+    } else {
+        return Ok(None);
     }
 }
 
@@ -906,7 +1164,6 @@ fn condition_to_text(cond: &Condition) -> Option<String> {
                     2 => format!("var(voice_lang)"),
                     3 => format!("var(skeleton_id)"),
                     4 => format!("var(start_town)"),
-                    9 => format!("var(quest_prog)"),
                     _ => format!("var({}, {})", pool, var),
                 }
             } else {

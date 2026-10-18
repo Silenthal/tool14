@@ -5,30 +5,18 @@ use std::{
 
 use crate::{
     database::Database,
-    model::{cutscene_dialogue::CutsceneDialogue, item_detail::ItemDetail, quest::Quest},
+    detail_level::DetailLevel,
+    model::{
+        cutscene_dialogue::CutsceneDialogue,
+        item_detail::ItemDetail,
+        lua_value::{LuaFunction, LuaValue},
+        quest::Quest,
+    },
 };
 use anyhow::Result;
 use ironworks::{Ironworks, excel::Excel};
 use levenshtein::levenshtein;
 use regex::Regex;
-
-#[derive(Default, Clone, Debug)]
-struct LuaFunction {
-    args: Vec<String>,
-    // var_map: HashMap<String, LuaValue>,
-}
-
-#[derive(Default, Clone, Debug)]
-enum LuaValue {
-    #[default]
-    Nil,
-    // Bool(bool), // Not handling these currently
-    Integer(i32),
-    // Float(f64), // Not handling these currently
-    String(String),
-    Function(LuaFunction),
-    Table(Vec<String>),
-}
 
 struct State<'a> {
     database: &'a Database,
@@ -215,15 +203,16 @@ static IGNORE_LOOKUP: LazyLock<HashSet<String>> = LazyLock::new(|| {
 });
 
 const FUNCTION_SKIP: &[&str] = &[
-    "IsTodoChecked",
-    "GetTodoArgs",
+    "_GetFreeWorkInfo",
     "GetGimmickState",
-    "GetNpcTradeItems",
-    "SCRIPT_VERSION",
-    "IsAnnounce",
-    "IsAcceptEvent",
-    "PLANDEF_GetMenuTextLabels",
     "GetMenuTextLabels",
+    "GetNpcTradeItems",
+    "GetTodoArgs",
+    "IsAcceptEvent",
+    "IsAnnounce",
+    "IsTodoChecked",
+    "PLANDEF_GetMenuTextLabels",
+    "SCRIPT_VERSION",
 ];
 
 static FUNCTION_SKIP_LOOKUP: LazyLock<HashSet<String>> = LazyLock::new(|| {
@@ -251,7 +240,7 @@ pub fn process(
     quest: &Quest,
     dialogue_dict: &HashMap<String, String>,
     lines: &Vec<String>,
-    is_all_script_instruction: bool,
+    detail_level: DetailLevel,
     func_report: &mut HashMap<i32, HashMap<String, i32>>,
 ) -> Result<Vec<String>> {
     let quest_tag = &quest.quest_id[..9];
@@ -266,7 +255,8 @@ pub fn process(
     let regex_start_item_block = Regex::new(r"([\w\.]+) == (?<listener_id>[\w\.]+) then$")?;
     let regex_unpack = Regex::new(r"unpack\((?<table_var>v\w+)\)")?;
     let regex_table_insert = Regex::new(r"table\.insert\(([\w]+), ([\w\.]+)(\[[\w\.]+\])?\)")?;
-    let mut listener_to_item = HashMap::new();
+    let regex_if = Regex::new(r"^\s*(?<if_type>(?:else)?if) (?<conditions>.*) then$")?;
+    let mut item_hand_over_list: Vec<(i32, String)> = Vec::new();
     let mut item_listener_id = 0;
     let mut output: Vec<String> = Vec::new();
     let mut state: State = State {
@@ -285,8 +275,13 @@ pub fn process(
     let mut script_version: i32 = 0;
     let mut inside_item_block = false;
     let mut inside_label_func = false;
+    let mut inside_quest_block = false;
+    let mut inside_quest_block_assign = false;
+    let mut inside_yesno_block = false;
+    let mut inside_cutscene = false;
+    let mut temp_quest_condition = String::new();
     let mut inside_label_func_name = String::new();
-    let mut temp_item_map: Vec<ItemDetail> = Vec::new();
+    let mut temp_item_list: Vec<ItemDetail> = Vec::new();
     let mut temp_text_list = Vec::new();
 
     if quest.listener_start != "" {
@@ -316,6 +311,10 @@ pub fn process(
             .self_var_map
             .insert(k.clone(), LuaValue::String(v.clone()));
     }
+
+    // for (k, v) in &database.get_quest_define_map(quest.number)?{
+    //     state.self_var_map.insert(k.clone(), LuaValue::Integer(*v));
+    // }
 
     for (k, v) in &database.quest_sys_define_map {
         state.self_var_map.insert(k.clone(), LuaValue::Integer(*v));
@@ -385,23 +384,19 @@ pub fn process(
             };
             let is_hq = is_hq_s == "true";
             let idtl = ItemDetail::new(item_name_index, count_i, is_hq);
-            if let Some(entry) = temp_item_map
+            if let Some(entry) = temp_item_list
                 .iter_mut()
                 .find(|e| (e.item_id, e.is_hq) == (idtl.item_id, idtl.is_hq))
             {
                 entry.count += idtl.count
             } else {
-                temp_item_map.push(idtl);
+                temp_item_list.push(idtl);
             }
-            // temp_item_map
-            //     .entry((idtl.item_id, idtl.is_hq))
-            //     .and_modify(|entry: &mut ItemDetail| entry.count += idtl.count)
-            //     .or_insert(idtl);
         } else if inside_item_block && line.trim() == "end" {
             inside_item_block = false;
-            if temp_item_map.len() > 0 {
+            if temp_item_list.len() > 0 {
                 let mut temp_item_str_list = Vec::new();
-                for v in &temp_item_map {
+                for v in &temp_item_list {
                     let Ok(Some(item_desc)) =
                         database.get_item_qty_desc(v.item_id, v.count, v.is_hq, 0)
                     else {
@@ -423,28 +418,23 @@ pub fn process(
                     }
                 };
                 let statement = format!("''The player hands over {combined}.''");
-                // output.push(statement.clone());
-                listener_to_item
-                    .entry(item_listener_id)
-                    .and_modify(|list: &mut Vec<String>| list.push(statement.clone()))
-                    .or_insert(vec![statement.clone()]);
-                temp_item_map.clear();
+                item_hand_over_list.push((item_listener_id, statement));
+                temp_item_list.clear();
                 item_listener_id = 0;
             }
         }
     }
 
-    for (k, v) in &listener_to_item {
+    for (k, item_line) in &item_hand_over_list {
         let listener = match database.get_event_npc(*k) {
             Ok(Some(s)) => s,
             _ => k.to_string(),
         };
-        for item_line in v {
-            output.push(format!("{listener}: {item_line}"));
-        }
+        output.push(format!("{listener}: {item_line}"));
     }
 
     for line in lines {
+        let mut is_assign = false;
         if line.starts_with("--") || line.starts_with("print(") {
             continue;
         }
@@ -456,12 +446,26 @@ pub fn process(
             if skip_to_end {
                 skip_to_end = false;
             } else {
-                output.push(format!("{}", line.clone()));
+                if detail_level != DetailLevel::NoScript {
+                    output.push(line.clone());
+                }
                 output.push(String::new());
             }
             continue;
         } else if skip_to_end {
             continue;
+        }
+
+        if line.trim() == "end" {
+            if inside_quest_block {
+                inside_quest_block = false;
+                inside_quest_block_assign = false;
+                if detail_level == DetailLevel::NoScript {
+                    output.push("---".to_string());
+                    continue;
+                }
+            }
+            inside_yesno_block = false;
         }
 
         if line.starts_with(quest_tag) {
@@ -472,7 +476,7 @@ pub fn process(
             }
             if let Some(cap) = regex_top_level.captures(line) {
                 let (_, [var, _]) = cap.extract();
-                if !is_all_script_instruction && FUNCTION_SKIP_LOOKUP.contains(var) {
+                if detail_level != DetailLevel::FullScript && FUNCTION_SKIP_LOOKUP.contains(var) {
                     skip_to_end = true;
                     continue;
                 }
@@ -487,7 +491,9 @@ pub fn process(
                     }
                 }
             }
-            output.push(line.clone());
+            if detail_level != DetailLevel::NoScript {
+                output.push(line.clone());
+            }
             continue;
         }
 
@@ -528,6 +534,13 @@ pub fn process(
             }
         }
         let mut temp_line = line.clone();
+        let mut temp_dialogue_line = String::new();
+        if line.trim() == "else" && inside_quest_block {
+            temp_dialogue_line = "> else".to_string();
+            inside_quest_block_assign = false;
+        } else if line.trim() == "elseif" && inside_quest_block {
+            inside_quest_block_assign = false;
+        }
         let mut temp_transform = Vec::new();
         let mut replaces = Vec::new();
         temp_line = regex_unpack
@@ -540,8 +553,8 @@ pub fn process(
             })
             .to_string();
         if let Some(cap) = regex_assign.captures(&temp_line) {
+            is_assign = true;
             let (_, [vars, vals]) = cap.extract();
-
             let variable_list: Vec<String> =
                 vars.split("λ ").map(|x| x.trim().to_string()).collect();
             let mut value_list: Vec<String> =
@@ -577,628 +590,733 @@ pub fn process(
                 for index in 0..variable_list.len() {
                     let var = variable_list.get(index).unwrap().clone();
                     let val = value_list.get(index).unwrap().clone();
-
                     if val == "target"
                         && let Some(n) = target_name
                     {
                         state.local_var_map.insert(var, LuaValue::String(n.clone()));
                     } else if let Some(lv) = eval_func(database, &state, &val)? {
-                        state.local_var_map.insert(var, lv);
+                        if inside_quest_block && inside_quest_block_assign {
+                            let a = state.local_var_map.get(&var);
+                            let b = &lv;
+                            match (a, b) {
+                                (Some(LuaValue::Integer(0)), LuaValue::Integer(1))
+                                | (None, LuaValue::Integer(1)) => {
+                                    _ = state
+                                        .local_var_map
+                                        .insert(var, LuaValue::String(temp_quest_condition.clone()))
+                                }
+                                (Some(LuaValue::Integer(1)), LuaValue::Integer(0)) => {
+                                    _ = state.local_var_map.insert(
+                                        var,
+                                        LuaValue::String(format!(
+                                            "!({})",
+                                            temp_quest_condition.clone()
+                                        )),
+                                    )
+                                }
+                                (Some(LuaValue::Integer(_)), LuaValue::Integer(a)) if *a >= 2 => {
+                                    _ = state.local_var_map.insert(var, LuaValue::NoSet)
+                                }
+                                (_, LuaValue::Integer(0)) => {}
+                                (_, _) => _ = state.local_var_map.insert(var, lv),
+                            }
+                        } else if !inside_quest_block {
+                            state.local_var_map.insert(var, lv);
+                        }
+                    } else if val.contains("GetAnimaWeaponQuestGender") {
+                        // HACK: Should have distinction to allow for more fine grained vars
+                        state.local_var_map.insert(var, LuaValue::String(val));
                     }
                 }
             }
         }
 
-        let replace_res: std::borrow::Cow<'_, str> = regex_call.replace_all(&temp_line, |cap: &regex::Captures| {
-            let (_, [var_caller, func, args]) = cap.extract();
-            if !state.self_var_map.contains_key(func){
-                func_report
-                .entry(script_version)
-                .and_modify(|e|{
-                    let _ = e
-                    .entry(func.to_string())
-                    .and_modify(|i|*i += 1)
-                    .or_insert(1);
-                });
-            }
-            let temp_arg_list = args.split(", ").map(|x| x.trim().to_string());
-            let mut arg_list_ls = Vec::new();
-            for arg in temp_arg_list{
-                // TODO: Here
-                if arg.starts_with("unpack!"){
-                    let strip_arg = arg.strip_prefix("unpack!").unwrap();
-                    if let Some(LuaValue::Table(x)) = state.local_var_map.get(strip_arg) {
-                        if x.len() == 0 {
-                            arg_list_ls.push(format!("unpack({})", strip_arg));
-                        } else {
-                            for a in x{
-                                arg_list_ls.push(a.clone());
+        let replace_res: std::borrow::Cow<'_, str> =
+            regex_call.replace_all(&temp_line, |cap: &regex::Captures| {
+                let (_, [var_caller, func, args]) = cap.extract();
+                if !state.self_var_map.contains_key(func) {
+                    func_report.entry(script_version).and_modify(|e| {
+                        let _ = e
+                            .entry(func.to_string())
+                            .and_modify(|i| *i += 1)
+                            .or_insert(1);
+                    });
+                }
+                let temp_arg_list = args.split(", ").map(|x| x.trim().to_string());
+                let mut arg_list_ls = Vec::new();
+                for arg in temp_arg_list {
+                    if arg.starts_with("unpack!") {
+                        let strip_arg = arg.strip_prefix("unpack!").unwrap();
+                        if let Some(LuaValue::Table(x)) = state.local_var_map.get(strip_arg) {
+                            if x.len() == 0 {
+                                arg_list_ls.push(format!("unpack({})", strip_arg));
+                            } else {
+                                for a in x {
+                                    arg_list_ls.push(a.clone());
+                                }
                             }
+                        } else {
+                            arg_list_ls.push(arg);
                         }
                     } else {
                         arg_list_ls.push(arg);
                     }
-                } else {
-                    arg_list_ls.push(arg);
                 }
-            }
-            match func {
-                "Talk" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let _ = arg_list.next(); // player
-                    let _ = arg_list.next(); // target
-                    let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let _ = arg_list.next(); // true to close dialog box
-                    let _ = arg_list.next(); // design
-                    let _ = arg_list.next(); // action
-                    let _ = arg_list.next(); // lip 1
-                    let _ = arg_list.next(); // lip 2?
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    if let Some(speaker_key) = get_id(&dialogue_key_opt) {
-                        let mut final_speaker = speaker_key.clone();
-                        let mut alt_name_speaker = String::new();
-                        if let Some(LuaValue::String(mut final_dialogue_line)) =
-                            get_self_var_value(&state, &dialogue_key_opt)
-                        {
-                            // If this is the *first* talk, it could be from the quest assigner
-                            if var_caller == state.target_var
-                                && let Some(name_ref) = target_name
+                match func {
+                    "Talk" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let _ = arg_list.next(); // player
+                        let _ = arg_list.next(); // target
+                        let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let _ = arg_list.next(); // true to close dialog box
+                        let _ = arg_list.next(); // design
+                        let _ = arg_list.next(); // action
+                        let _ = arg_list.next(); // lip 1
+                        let _ = arg_list.next(); // lip 2?
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        if let Some(speaker_key) = get_id(&dialogue_key_opt) {
+                            let mut final_speaker = speaker_key.clone();
+                            let mut alt_name_speaker = String::new();
+                            if let Some(LuaValue::String(mut final_dialogue_line)) =
+                                get_self_var_value(&state, &dialogue_key_opt)
                             {
-                                final_speaker = name_ref.clone();
-                                clear_target_name = true;
-                            }
-                            // If var was assigned as the listener before, use that name
-                            else if let Some(speaker) = state.var_to_name.get(var_caller) {
-                                final_speaker = speaker.clone();
-                            }
-                            // If var was just assigned a string by bind/create char at some point, use that name
-                            else if let Some(LuaValue::String(x)) =
-                                state.local_var_map.get(var_caller)
-                            {
-                                state.var_to_name.insert(var_caller.to_string(), x.clone());
-                                final_speaker = x.clone();
-                            }
-                            // If var is somewhere in the listener name list, use that name
-                            else if let Some(speaker) =
-                                find_closest_name(&mut state, &speaker_key, 2)
-                            {
-                                if var_caller != state.target_var {
-                                    state
-                                        .var_to_name
-                                        .insert(var_caller.to_string(), speaker.clone());
+                                // If this is the *first* talk, it could be from the quest assigner
+                                if var_caller == state.target_var
+                                    && let Some(name_ref) = target_name
+                                {
+                                    final_speaker = name_ref.clone();
+                                    clear_target_name = true;
                                 }
-                                final_speaker = speaker;
-                            } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
-                                final_speaker = speaker.clone();
+                                // If var was assigned as the listener before, use that name
+                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
+                                    final_speaker = speaker.clone();
+                                }
+                                // If var was just assigned a string by bind/create char at some point, use that name
+                                else if let Some(LuaValue::String(x)) =
+                                    state.local_var_map.get(var_caller)
+                                {
+                                    state.var_to_name.insert(var_caller.to_string(), x.clone());
+                                    final_speaker = x.clone();
+                                }
+                                // If var is somewhere in the listener name list, use that name
+                                else if let Some(speaker) =
+                                    find_closest_name(&mut state, &speaker_key, 2)
+                                {
+                                    if var_caller != state.target_var {
+                                        state
+                                            .var_to_name
+                                            .insert(var_caller.to_string(), speaker.clone());
+                                    }
+                                    final_speaker = speaker;
+                                } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
+                                    final_speaker = speaker.clone();
+                                }
+                                if let Some(caps) =
+                                    regex_dialogue_alt_speaker.captures(&final_dialogue_line)
+                                {
+                                    let (_, [alt_name]) = caps.extract();
+                                    alt_name_speaker = format!("@{alt_name}");
+                                    final_dialogue_line = final_dialogue_line
+                                        .strip_prefix(format!("(-{alt_name}-)").as_str())
+                                        .unwrap_or(&final_dialogue_line)
+                                        .to_string();
+                                }
+                                trim_after = detail_level != DetailLevel::FullScript;
+                                let prefix = if detail_level == DetailLevel::FullScript {
+                                    format!("{}\n", cap[0].to_string())
+                                } else {
+                                    String::new()
+                                };
+                                let dialogue_line = format!(
+                                    "{final_speaker}{alt_name_speaker}: {final_dialogue_line}"
+                                );
+                                temp_dialogue_line = dialogue_line.clone();
+                                format!("{prefix}\n{dialogue_line}\n")
+                            } else {
+                                cap[0].to_string()
                             }
-                            if let Some(caps) =
-                                regex_dialogue_alt_speaker.captures(&final_dialogue_line)
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "TalkAsync" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let _ = arg_list.next(); // player
+                        let _ = arg_list.next(); // target
+                        let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let _ = arg_list.next(); // design
+                        let _ = arg_list.next(); // action
+                        let _ = arg_list.next(); // lip 1
+                        let _ = arg_list.next(); // lip 2?
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        if let Some(speaker_key) = get_id(&dialogue_key_opt) {
+                            let mut final_speaker = speaker_key.clone();
+                            let mut alt_name_speaker = String::new();
+                            if let Some(LuaValue::String(mut final_dialogue_line)) =
+                                get_self_var_value(&state, &dialogue_key_opt)
                             {
-                                let (_, [alt_name]) = caps.extract();
-                                alt_name_speaker = format!("@{alt_name}");
-                                final_dialogue_line = final_dialogue_line
-                                    .strip_prefix(format!("(-{alt_name}-)").as_str())
-                                    .unwrap_or(&final_dialogue_line)
-                                    .to_string();
+                                // If this is the *first* talk, it could be from the quest assigner
+                                if var_caller == state.target_var
+                                    && let Some(name_ref) = target_name
+                                {
+                                    final_speaker = name_ref.clone();
+                                    clear_target_name = true;
+                                }
+                                // If var was assigned as the listener before, use that name
+                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
+                                    final_speaker = speaker.clone();
+                                }
+                                // If var was just assigned a string by bind/create char at some point, use that name
+                                else if let Some(LuaValue::String(x)) =
+                                    state.local_var_map.get(var_caller)
+                                {
+                                    state.var_to_name.insert(var_caller.to_string(), x.clone());
+                                    final_speaker = x.clone();
+                                }
+                                // If var is somewhere in the listener name list, use that name
+                                else if let Some(speaker) =
+                                    find_closest_name(&mut state, &speaker_key, 2)
+                                {
+                                    if var_caller != state.target_var {
+                                        state
+                                            .var_to_name
+                                            .insert(var_caller.to_string(), speaker.clone());
+                                    }
+                                    final_speaker = speaker;
+                                } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
+                                    final_speaker = speaker.clone();
+                                }
+                                if let Some(caps) =
+                                    regex_dialogue_alt_speaker.captures(&final_dialogue_line)
+                                {
+                                    let (_, [alt_name]) = caps.extract();
+                                    alt_name_speaker = format!("@{alt_name}");
+                                    final_dialogue_line = final_dialogue_line
+                                        .strip_prefix(format!("(-{alt_name}-)").as_str())
+                                        .unwrap_or(&final_dialogue_line)
+                                        .to_string();
+                                }
+                                trim_after = detail_level != DetailLevel::FullScript;
+                                let prefix = if detail_level == DetailLevel::FullScript {
+                                    format!("{}\n", cap[0].to_string())
+                                } else {
+                                    String::new()
+                                };
+                                let dialogue_line = format!(
+                                    "{final_speaker}{alt_name_speaker}: {final_dialogue_line}"
+                                );
+                                temp_dialogue_line = dialogue_line.clone();
+                                format!("{prefix}\n{dialogue_line}\n")
+                            } else {
+                                cap[0].to_string()
                             }
-                            trim_after = !is_all_script_instruction;
-                            let prefix = if is_all_script_instruction {
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "ShortTalk" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let _ = arg_list.next(); // target
+                        let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let _ = arg_list.next(); // design
+                        let _ = arg_list.next(); // action
+                        let _ = arg_list.next(); // time
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        if let Some(speaker_key) = get_id(&dialogue_key_opt) {
+                            let mut final_speaker = speaker_key.clone();
+                            let mut alt_name_speaker = String::new();
+                            if let Some(LuaValue::String(mut final_dialogue_line)) =
+                                get_self_var_value(&state, &dialogue_key_opt)
+                            {
+                                // If this is the *first* talk, it could be from the quest assigner
+                                if var_caller == state.target_var
+                                    && let Some(name_ref) = target_name
+                                {
+                                    final_speaker = name_ref.clone();
+                                    clear_target_name = true;
+                                }
+                                // If var was assigned as the listener before, use that name
+                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
+                                    final_speaker = speaker.clone();
+                                }
+                                // If var was just assigned a string by bind/create char at some point, use that name
+                                else if let Some(LuaValue::String(x)) =
+                                    state.local_var_map.get(var_caller)
+                                {
+                                    state.var_to_name.insert(var_caller.to_string(), x.clone());
+                                    final_speaker = x.clone();
+                                }
+                                // If var is somewhere in the listener name list, use that name
+                                else if let Some(speaker) =
+                                    find_closest_name(&mut state, &speaker_key, 2)
+                                {
+                                    if var_caller != state.target_var {
+                                        state
+                                            .var_to_name
+                                            .insert(var_caller.to_string(), speaker.clone());
+                                    }
+                                    final_speaker = speaker;
+                                } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
+                                    final_speaker = speaker.clone();
+                                }
+                                if let Some(caps) =
+                                    regex_dialogue_alt_speaker.captures(&final_dialogue_line)
+                                {
+                                    let (_, [alt_name]) = caps.extract();
+                                    alt_name_speaker = format!("@{alt_name}");
+                                    final_dialogue_line = final_dialogue_line
+                                        .strip_prefix(format!("(-{alt_name}-)").as_str())
+                                        .unwrap_or(&final_dialogue_line)
+                                        .to_string();
+                                }
+                                trim_after = detail_level != DetailLevel::FullScript;
+                                let prefix = if detail_level == DetailLevel::FullScript {
+                                    format!("{}\n", cap[0].to_string())
+                                } else {
+                                    String::new()
+                                };
+                                let dialogue_line = format!(
+                                    "{final_speaker}{alt_name_speaker}: {final_dialogue_line}"
+                                );
+                                temp_dialogue_line = dialogue_line.clone();
+                                format!("{prefix}\n{dialogue_line}\n")
+                            } else {
+                                cap[0].to_string()
+                            }
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "ShortTalkWithLineVoice" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let _ = arg_list.next(); // target
+                        let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let _ = arg_list.next(); // design
+                        let _ = arg_list.next();
+                        let _ = arg_list.next();
+                        let _ = arg_list.next(); // time
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        if let Some(speaker_key) = get_id(&dialogue_key_opt) {
+                            let mut final_speaker = speaker_key.clone();
+                            let mut alt_name_speaker = String::new();
+                            if let Some(LuaValue::String(mut final_dialogue_line)) =
+                                get_self_var_value(&state, &dialogue_key_opt)
+                            {
+                                // If this is the *first* talk, it could be from the quest assigner
+                                if var_caller == state.target_var
+                                    && let Some(name_ref) = target_name
+                                {
+                                    final_speaker = name_ref.clone();
+                                    clear_target_name = true;
+                                }
+                                // If var was assigned as the listener before, use that name
+                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
+                                    final_speaker = speaker.clone();
+                                }
+                                // If var was just assigned a string by bind/create char at some point, use that name
+                                else if let Some(LuaValue::String(x)) =
+                                    state.local_var_map.get(var_caller)
+                                {
+                                    state.var_to_name.insert(var_caller.to_string(), x.clone());
+                                    final_speaker = x.clone();
+                                }
+                                // If var is somewhere in the listener name list, use that name
+                                else if let Some(speaker) =
+                                    find_closest_name(&mut state, &speaker_key, 2)
+                                {
+                                    if var_caller != state.target_var {
+                                        state
+                                            .var_to_name
+                                            .insert(var_caller.to_string(), speaker.clone());
+                                    }
+                                    final_speaker = speaker;
+                                } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
+                                    final_speaker = speaker.clone();
+                                }
+                                if let Some(caps) =
+                                    regex_dialogue_alt_speaker.captures(&final_dialogue_line)
+                                {
+                                    let (_, [alt_name]) = caps.extract();
+                                    alt_name_speaker = format!("@{alt_name}");
+                                    final_dialogue_line = final_dialogue_line
+                                        .strip_prefix(format!("(-{alt_name}-)").as_str())
+                                        .unwrap_or(&final_dialogue_line)
+                                        .to_string();
+                                }
+                                trim_after = detail_level != DetailLevel::FullScript;
+                                let prefix = if detail_level == DetailLevel::FullScript {
+                                    format!("{}\n", cap[0].to_string())
+                                } else {
+                                    String::new()
+                                };
+                                let dialogue_line = format!(
+                                    "{final_speaker}{alt_name_speaker}: {final_dialogue_line}"
+                                );
+                                temp_dialogue_line = dialogue_line.clone();
+                                format!("{prefix}\n{dialogue_line}\n")
+                            } else {
+                                cap[0].to_string()
+                            }
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "BalloonTalk" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let _ = arg_list.next(); // player
+                        let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let _ = arg_list.next(); // time
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        if let Some(speaker_key) = get_id(&dialogue_key_opt) {
+                            let mut final_speaker = speaker_key.clone();
+                            let mut alt_name_speaker = String::new();
+                            if let Some(LuaValue::String(mut final_dialogue_line)) =
+                                get_self_var_value(&state, &dialogue_key_opt)
+                            {
+                                // If this is the *first* talk, it could be from the quest assigner
+                                if var_caller == state.target_var
+                                    && let Some(name_ref) = target_name
+                                {
+                                    final_speaker = name_ref.clone();
+                                    clear_target_name = true;
+                                }
+                                // If var was assigned as the listener before, use that name
+                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
+                                    final_speaker = speaker.clone();
+                                }
+                                // If var was just assigned a string by bind/create char at some point, use that name
+                                else if let Some(LuaValue::String(x)) =
+                                    state.local_var_map.get(var_caller)
+                                {
+                                    state.var_to_name.insert(var_caller.to_string(), x.clone());
+                                    final_speaker = x.clone();
+                                }
+                                // If var is somewhere in the listener name list, use that name
+                                else if let Some(speaker) =
+                                    find_closest_name(&mut state, &speaker_key, 2)
+                                {
+                                    if var_caller != state.target_var {
+                                        state
+                                            .var_to_name
+                                            .insert(var_caller.to_string(), speaker.clone());
+                                    }
+                                    final_speaker = speaker;
+                                } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
+                                    final_speaker = speaker.clone();
+                                }
+                                if let Some(caps) =
+                                    regex_dialogue_alt_speaker.captures(&final_dialogue_line)
+                                {
+                                    let (_, [alt_name]) = caps.extract();
+                                    alt_name_speaker = format!("@{alt_name}");
+                                    final_dialogue_line = final_dialogue_line
+                                        .strip_prefix(format!("(-{alt_name}-)").as_str())
+                                        .unwrap_or(&final_dialogue_line)
+                                        .to_string();
+                                }
+                                trim_after = detail_level != DetailLevel::FullScript;
+                                let prefix = if detail_level == DetailLevel::FullScript {
+                                    format!("{}\n", cap[0].to_string())
+                                } else {
+                                    String::new()
+                                };
+                                let dialogue_line = format!(
+                                    "{final_speaker}{alt_name_speaker}: {final_dialogue_line}"
+                                );
+                                temp_dialogue_line = dialogue_line.clone();
+                                format!("{prefix}\n{dialogue_line}\n")
+                            } else {
+                                cap[0].to_string()
+                            }
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "SystemTalk" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let _ = arg_list.next(); // true to close dialog box
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        if let Some(_) = get_id(&dialogue_key_opt) {
+                            let Some(LuaValue::String(final_dialogue_line)) =
+                                get_self_var_value(&state, &dialogue_key_opt)
+                            else {
+                                return cap[0].to_string();
+                            };
+                            trim_after = detail_level != DetailLevel::FullScript;
+                            let prefix = if detail_level == DetailLevel::FullScript {
                                 format!("{}\n", cap[0].to_string())
                             } else {
                                 String::new()
                             };
-                            format!(
-                                "{prefix}\n{final_speaker}{alt_name_speaker}: {final_dialogue_line}\n"
-                            )
+                            let dialogue_line = format!("System: {final_dialogue_line}");
+                            temp_dialogue_line = dialogue_line.clone();
+                            format!("{prefix}\n{dialogue_line}\n")
                         } else {
                             cap[0].to_string()
                         }
-                    } else {
-                        cap[0].to_string()
                     }
-                }
-                "TalkAsync" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let _ = arg_list.next(); // player
-                    let _ = arg_list.next(); // target
-                    let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let _ = arg_list.next(); // design
-                    let _ = arg_list.next(); // action
-                    let _ = arg_list.next(); // lip 1
-                    let _ = arg_list.next(); // lip 2?
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    if let Some(speaker_key) = get_id(&dialogue_key_opt) {
-                        let mut final_speaker = speaker_key.clone();
-                        let mut alt_name_speaker = String::new();
-                        if let Some(LuaValue::String(mut final_dialogue_line)) =
-                            get_self_var_value(&state, &dialogue_key_opt)
-                        {
-                            // If this is the *first* talk, it could be from the quest assigner
-                            if var_caller == state.target_var
-                                && let Some(name_ref) = target_name
-                            {
-                                final_speaker = name_ref.clone();
-                                clear_target_name = true;
-                            }
-                            // If var was assigned as the listener before, use that name
-                            else if let Some(speaker) = state.var_to_name.get(var_caller) {
-                                final_speaker = speaker.clone();
-                            }
-                            // If var was just assigned a string by bind/create char at some point, use that name
-                            else if let Some(LuaValue::String(x)) =
-                                state.local_var_map.get(var_caller)
-                            {
-                                state.var_to_name.insert(var_caller.to_string(), x.clone());
-                                final_speaker = x.clone();
-                            }
-                            // If var is somewhere in the listener name list, use that name
-                            else if let Some(speaker) =
-                                find_closest_name(&mut state, &speaker_key, 2)
-                            {
-                                if var_caller != state.target_var {
-                                    state
-                                        .var_to_name
-                                        .insert(var_caller.to_string(), speaker.clone());
-                                }
-                                final_speaker = speaker;
-                            } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
-                                final_speaker = speaker.clone();
-                            }
-                            if let Some(caps) =
-                                regex_dialogue_alt_speaker.captures(&final_dialogue_line)
-                            {
-                                let (_, [alt_name]) = caps.extract();
-                                alt_name_speaker = format!("@{alt_name}");
-                                final_dialogue_line = final_dialogue_line
-                                    .strip_prefix(format!("(-{alt_name}-)").as_str())
-                                    .unwrap_or(&final_dialogue_line)
-                                    .to_string();
-                            }
-                            trim_after = !is_all_script_instruction;
-                            let prefix = if is_all_script_instruction {
-                                format!("{}\n", cap[0].to_string())
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "{prefix}\n{final_speaker}{alt_name_speaker}: {final_dialogue_line}\n"
-                            )
-                        } else {
-                            cap[0].to_string()
-                        }
-                    } else {
-                        cap[0].to_string()
-                    }
-                }
-                "ShortTalk" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let _ = arg_list.next(); // target
-                    let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let _ = arg_list.next(); // design
-                    let _ = arg_list.next(); // action
-                    let _ = arg_list.next(); // time
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    if let Some(speaker_key) = get_id(&dialogue_key_opt) {
-                        let mut final_speaker = speaker_key.clone();
-                        let mut alt_name_speaker = String::new();
-                        if let Some(LuaValue::String(mut final_dialogue_line)) =
-                            get_self_var_value(&state, &dialogue_key_opt)
-                        {
-                            // If this is the *first* talk, it could be from the quest assigner
-                            if var_caller == state.target_var
-                                && let Some(name_ref) = target_name
-                            {
-                                final_speaker = name_ref.clone();
-                                clear_target_name = true;
-                            }
-                            // If var was assigned as the listener before, use that name
-                            else if let Some(speaker) = state.var_to_name.get(var_caller) {
-                                final_speaker = speaker.clone();
-                            }
-                            // If var was just assigned a string by bind/create char at some point, use that name
-                            else if let Some(LuaValue::String(x)) =
-                                state.local_var_map.get(var_caller)
-                            {
-                                state.var_to_name.insert(var_caller.to_string(), x.clone());
-                                final_speaker = x.clone();
-                            }
-                            // If var is somewhere in the listener name list, use that name
-                            else if let Some(speaker) =
-                                find_closest_name(&mut state, &speaker_key, 2)
-                            {
-                                if var_caller != state.target_var {
-                                    state
-                                        .var_to_name
-                                        .insert(var_caller.to_string(), speaker.clone());
-                                }
-                                final_speaker = speaker;
-                            } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
-                                final_speaker = speaker.clone();
-                            }
-                            if let Some(caps) =
-                                regex_dialogue_alt_speaker.captures(&final_dialogue_line)
-                            {
-                                let (_, [alt_name]) = caps.extract();
-                                alt_name_speaker = format!("@{alt_name}");
-                                final_dialogue_line = final_dialogue_line
-                                    .strip_prefix(format!("(-{alt_name}-)").as_str())
-                                    .unwrap_or(&final_dialogue_line)
-                                    .to_string();
-                            }
-                            trim_after = !is_all_script_instruction;
-                            let prefix = if is_all_script_instruction {
-                                format!("{}\n", cap[0].to_string())
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "{prefix}\n{final_speaker}{alt_name_speaker}: {final_dialogue_line}\n"
-                            )
-                        } else {
-                            cap[0].to_string()
-                        }
-                    } else {
-                        cap[0].to_string()
-                    }
-                }
-                "ShortTalkWithLineVoice" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let _ = arg_list.next(); // target
-                    let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let _ = arg_list.next(); // design
-                    let _ = arg_list.next();
-                    let _ = arg_list.next();
-                    let _ = arg_list.next(); // time
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    if let Some(speaker_key) = get_id(&dialogue_key_opt) {
-                        let mut final_speaker = speaker_key.clone();
-                        let mut alt_name_speaker = String::new();
-                        if let Some(LuaValue::String(mut final_dialogue_line)) =
-                            get_self_var_value(&state, &dialogue_key_opt)
-                        {
-                            // If this is the *first* talk, it could be from the quest assigner
-                            if var_caller == state.target_var
-                                && let Some(name_ref) = target_name
-                            {
-                                final_speaker = name_ref.clone();
-                                clear_target_name = true;
-                            }
-                            // If var was assigned as the listener before, use that name
-                            else if let Some(speaker) = state.var_to_name.get(var_caller) {
-                                final_speaker = speaker.clone();
-                            }
-                            // If var was just assigned a string by bind/create char at some point, use that name
-                            else if let Some(LuaValue::String(x)) =
-                                state.local_var_map.get(var_caller)
-                            {
-                                state.var_to_name.insert(var_caller.to_string(), x.clone());
-                                final_speaker = x.clone();
-                            }
-                            // If var is somewhere in the listener name list, use that name
-                            else if let Some(speaker) =
-                                find_closest_name(&mut state, &speaker_key, 2)
-                            {
-                                if var_caller != state.target_var {
-                                    state
-                                        .var_to_name
-                                        .insert(var_caller.to_string(), speaker.clone());
-                                }
-                                final_speaker = speaker;
-                            } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
-                                final_speaker = speaker.clone();
-                            }
-                            if let Some(caps) =
-                                regex_dialogue_alt_speaker.captures(&final_dialogue_line)
-                            {
-                                let (_, [alt_name]) = caps.extract();
-                                alt_name_speaker = format!("@{alt_name}");
-                                final_dialogue_line = final_dialogue_line
-                                    .strip_prefix(format!("(-{alt_name}-)").as_str())
-                                    .unwrap_or(&final_dialogue_line)
-                                    .to_string();
-                            }
-                            trim_after = !is_all_script_instruction;
-                            let prefix = if is_all_script_instruction {
-                                format!("{}\n", cap[0].to_string())
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "{prefix}\n{final_speaker}{alt_name_speaker}: {final_dialogue_line}\n"
-                            )
-                        } else {
-                            cap[0].to_string()
-                        }
-                    } else {
-                        cap[0].to_string()
-                    }
-                }
-                "BalloonTalk" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let _ = arg_list.next(); // player
-                    let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let _ = arg_list.next(); // time
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    if let Some(speaker_key) = get_id(&dialogue_key_opt) {
-                        let mut final_speaker = speaker_key.clone();
-                        let mut alt_name_speaker = String::new();
-                        if let Some(LuaValue::String(mut final_dialogue_line)) =
-                            get_self_var_value(&state, &dialogue_key_opt)
-                        {
-                            // If this is the *first* talk, it could be from the quest assigner
-                            if var_caller == state.target_var
-                                && let Some(name_ref) = target_name
-                            {
-                                final_speaker = name_ref.clone();
-                                clear_target_name = true;
-                            }
-                            // If var was assigned as the listener before, use that name
-                            else if let Some(speaker) = state.var_to_name.get(var_caller) {
-                                final_speaker = speaker.clone();
-                            }
-                            // If var was just assigned a string by bind/create char at some point, use that name
-                            else if let Some(LuaValue::String(x)) =
-                                state.local_var_map.get(var_caller)
-                            {
-                                state.var_to_name.insert(var_caller.to_string(), x.clone());
-                                final_speaker = x.clone();
-                            }
-                            // If var is somewhere in the listener name list, use that name
-                            else if let Some(speaker) =
-                                find_closest_name(&mut state, &speaker_key, 2)
-                            {
-                                if var_caller != state.target_var {
-                                    state
-                                        .var_to_name
-                                        .insert(var_caller.to_string(), speaker.clone());
-                                }
-                                final_speaker = speaker;
-                            } else if let Some(speaker) = NAME_LOOKUP.get(&speaker_key) {
-                                final_speaker = speaker.clone();
-                            }
-                            if let Some(caps) =
-                                regex_dialogue_alt_speaker.captures(&final_dialogue_line)
-                            {
-                                let (_, [alt_name]) = caps.extract();
-                                alt_name_speaker = format!("@{alt_name}");
-                                final_dialogue_line = final_dialogue_line
-                                    .strip_prefix(format!("(-{alt_name}-)").as_str())
-                                    .unwrap_or(&final_dialogue_line)
-                                    .to_string();
-                            }
-                            trim_after = !is_all_script_instruction;
-                            let prefix = if is_all_script_instruction {
-                                format!("{}\n", cap[0].to_string())
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "{prefix}\n{final_speaker}{alt_name_speaker}: {final_dialogue_line}\n"
-                            )
-                        } else {
-                            cap[0].to_string()
-                        }
-                    } else {
-                        cap[0].to_string()
-                    }
-                }
-                "SystemTalk" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let _ = arg_list.next(); // true to close dialog box
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    if let Some(_) = get_id(&dialogue_key_opt) {
-                        let Some(LuaValue::String(final_dialogue_line)) =
-                            get_self_var_value(&state, &dialogue_key_opt)
+                    "Menu" | "GimmickMenu" | "ResultMenu" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let question_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let final_dialogue_line: String;
+                        let Ok(Some(LuaValue::String(question))) =
+                            eval_func(&database, &state, &question_opt.unwrap())
                         else {
                             return cap[0].to_string();
                         };
-                        trim_after = !is_all_script_instruction;
-                        let prefix = if is_all_script_instruction {
+                        let mut line_list = vec![format!("Question: {question}")];
+                        for answers in arg_list {
+                            if let Some(answer_key) = get_self_var_name(&Some(answers)) {
+                                let lookup = get_self_var_value(&state, &Some(answer_key.clone()));
+                                if let Some(LuaValue::String(answer_s)) = lookup {
+                                    line_list.push(format!("> {answer_s}"));
+                                }
+                            }
+                        }
+                        line_list.push("---".to_string());
+                        final_dialogue_line = line_list.join("\n");
+                        temp_dialogue_line = final_dialogue_line.clone();
+                        format!("{}\n\n{final_dialogue_line}\n", cap[0].to_string())
+                    }
+                    "YesNo" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let question_opt = get_self_var_name(&arg_list.next()); // actual line
+                        let final_dialogue_line: String;
+                        let Some(LuaValue::String(question)) =
+                            get_self_var_value(&state, &question_opt)
+                        else {
+                            return cap[0].to_string();
+                        };
+                        final_dialogue_line = format!("Question: {question}\n> Yes\n> No\n---");
+                        temp_dialogue_line = final_dialogue_line.clone();
+                        format!("{}\n\n{final_dialogue_line}\n", cap[0].to_string())
+                    }
+                    "YesNoQuestBattle" => {
+                        // Note: only works for below 200 - tables InstanceContent and InstanceContentTextData have text with no NPCs attached
+                        inside_yesno_block = true;
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let question_opt = get_self_var_value(&state, &arg_list.next());
+                        if let Some(LuaValue::Integer(i)) = &question_opt
+                            && let Some(qb) = database.get_quest_battle(*i).ok().flatten()
+                        {
+                            let mut temp = Vec::new();
+                            if detail_level != DetailLevel::NoScript {
+                                temp.push(cap[0].to_string());
+                            }
+                            let mut paths = Vec::new();
+                            for (_, v) in qb
+                                .quest_battle_params
+                                .iter()
+                                .filter(|(k, _)| k.starts_with("CUT_SCENE"))
+                            {
+                                let Some(cut_path_opt) =
+                                    database.get_cutscene_path(*v).ok().flatten()
+                                else {
+                                    continue;
+                                };
+                                paths.push(cut_path_opt);
+                            }
+                            paths.sort_by_key(|path| {
+                                let filename = path.split('/').last().unwrap_or("");
+                                let name_part = filename.rsplit('.').next().unwrap_or("");
+                                let start_index = name_part.len() - 5;
+                                name_part[start_index..].parse::<u32>().unwrap_or(0)
+                            });
+
+                            for cut_path in paths {
+                                let Ok(mut cutscene_text) = get_cutscene_text_by_path(
+                                    ironworks,
+                                    excel,
+                                    database,
+                                    &cut_path,
+                                    detail_level,
+                                    &Vec::new(),
+                                ) else {
+                                    continue;
+                                };
+                                temp.append(&mut cutscene_text);
+                                temp.push(String::new());
+                            }
+                            let final_lines = temp.join("\n");
+                            temp_dialogue_line = final_lines.clone();
+                            final_lines
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "PlayCutScene" => {
+                        let ct = arg_list_ls.len();
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let log_key_opt = get_self_var_value(&state, &arg_list.next());
+                        let Some(LuaValue::Integer(cut_index)) = log_key_opt else {
+                            return cap[0].to_string();
+                        };
+                        let mut rest = Vec::new();
+                        if ct >= 3 {
+                            let _ = arg_list.next();
+                            for arg in arg_list {
+                                if let Some(LuaValue::String(s)) = state.local_var_map.get(&arg) {
+                                    rest.push((arg, Some(s.clone())));
+                                } else {
+                                    rest.push((arg, None));
+                                }
+                            }
+                        }
+                        let Ok(dialogue_list) = get_cutscene_text_by_index(
+                            ironworks,
+                            excel,
+                            database,
+                            cut_index,
+                            detail_level,
+                            &rest,
+                        ) else {
+                            return cap[0].to_string();
+                        };
+
+                        let mut dialogue_str = String::new();
+                        trim_after = detail_level != DetailLevel::FullScript;
+                        if dialogue_list.len() > 0 {
+                            dialogue_str = format!("\n{}\n", dialogue_list.join("\n"));
+                        }
+                        let prefix = if detail_level == DetailLevel::FullScript
+                            || (detail_level != DetailLevel::NoScript && is_assign)
+                        {
                             format!("{}\n", cap[0].to_string())
                         } else {
                             String::new()
                         };
-                        format!("{prefix}\nSystem: {final_dialogue_line}\n")
-                    } else {
-                        cap[0].to_string()
+                        temp_dialogue_line = dialogue_str.clone();
+                        format!("{}{}", prefix, dialogue_str)
                     }
-                }
-                "Menu" | "GimmickMenu" | "ResultMenu" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let question_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let final_dialogue_line: String;
-                    let Ok(Some(LuaValue::String(question))) =
-                        eval_func(&database, &state, &question_opt.unwrap())
-                    else {
-                        return cap[0].to_string();
-                    };
-                    let mut line_list = vec![format!("Question: {question}")];
-                    for answers in arg_list {
-                        if let Some(answer_key) = get_self_var_name(&Some(answers)) {
-                            let lookup = get_self_var_value(&state, &Some(answer_key.clone()));
-                            if let Some(LuaValue::String(answer_s)) =
-                                lookup
-                            {
-                                line_list.push(format!("> {answer_s}"));
-                            }
-                        }
-                    }
-                    final_dialogue_line = line_list.join("\n");
-                    format!("{}\n\n{final_dialogue_line}\n", cap[0].to_string())
-                }
-                "YesNo" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let question_opt = get_self_var_name(&arg_list.next()); // actual line
-                    let final_dialogue_line: String;
-                    let Some(LuaValue::String(question)) =
-                        get_self_var_value(&state, &question_opt)
-                    else {
-                        return cap[0].to_string();
-                    };
-                    final_dialogue_line = format!("Question: {question}\n> Yes\n> No");
-                    format!("{}\n\n{final_dialogue_line}\n", cap[0].to_string())
-                }
-                "YesNoQuestBattle" => {
-                    // Note: only works for below 200 - tables InstanceContent and InstanceContentTextData have text with no NPCs attached
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let question_opt = get_self_var_value(&state, &arg_list.next());
-                    if let Some(LuaValue::Integer(i)) = &question_opt && let Some(qb) = database.get_quest_battle(*i).ok().flatten() {
-                        let mut temp = vec![cap[0].to_string()];
-                        let mut paths = Vec::new();
-                        for (_, v) in qb.quest_battle_params.iter().filter(|(k, _)|k.starts_with("CUT_SCENE")){
-                            let Some(cut_path_opt) = database.get_cutscene_path(*v).ok().flatten() else{
-                                continue;
-                            };
-                            paths.push(cut_path_opt);
-                        }
-                        paths.sort_by_key(|path| {
-                            let filename = path.split('/').last().unwrap_or("");
-                            let name_part = filename.rsplit('.').next().unwrap_or("");
-                            let start_index = name_part.len() - 5;
-                            name_part[start_index..].parse::<u32>().unwrap_or(0)
-                        });
-                        for cut_path in paths {
-                            let Ok(mut cutscene_text) = get_cutscene_text_by_path(ironworks, excel, database, &cut_path, is_all_script_instruction) else{
-                                continue;
-                            };
-                            temp.append(&mut cutscene_text);
-                            temp.push(String::new());
-                        }
-                        temp.join("\n")
-                    }
-                    else{
-                        cap[0].to_string()
-                    }
-                }
-                "PlayCutScene" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let log_key_opt = get_self_var_value(&state, &arg_list.next());
-                    let Some(LuaValue::Integer(cut_index)) = log_key_opt else{
-                        return cap[0].to_string();
-                    };
-                    let Ok(dialogue_list) = get_cutscene_text_by_index(ironworks, excel, database, cut_index, is_all_script_instruction) else {
-                        return cap[0].to_string();
-                    };
-
-                    let mut dialogue_str = String::new();
-                    trim_after = !is_all_script_instruction;
-                    if dialogue_list.len() > 0{
-                        dialogue_str = format!("\n{}\n", dialogue_list.join("\n"));
-                    }
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
-                        String::new()
-                    };
-                    format!("{}{}", prefix, dialogue_str)
-                }
-                "LogMessage" | "ScenarioMessage" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let log_key_opt = get_self_var_value(&state, &arg_list.next());
-                    // let local_dialogue_args: Vec<String> = arg_list.collect();
-                    let line_val = match log_key_opt{
-                        Some(LuaValue::Integer(log_key)) => {
-                            database
+                    "LogMessage" | "ScenarioMessage" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let log_key_opt = get_self_var_value(&state, &arg_list.next());
+                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        let line_val = match log_key_opt {
+                            Some(LuaValue::Integer(log_key)) => database
                                 .get_name_in_table("LogMessage", "Text", log_key)
                                 .ok()
-                                .flatten()
-                        },
-                        Some(LuaValue::String(s)) => {
-                            Some(s)
+                                .flatten(),
+                            Some(LuaValue::String(s)) => Some(s),
+                            _ => None,
+                        };
+                        let Some(final_dialogue_line) = line_val else {
+                            return cap[0].to_string();
+                        };
+                        trim_after = detail_level != DetailLevel::FullScript;
+                        let prefix = if detail_level == DetailLevel::FullScript {
+                            format!("{}\n", cap[0].to_string())
+                        } else {
+                            String::new()
+                        };
+                        let dialogue_line = format!("Popup: {final_dialogue_line}");
+                        temp_dialogue_line = dialogue_line.clone();
+                        format!("{prefix}\n{dialogue_line}\n")
+                    }
+                    "IsQuestAccepted" | "IsQuestCompleted" | "GetQuestSequence" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let quest_link_opt = arg_list.next();
+                        if line.trim().starts_with("if ") || line.trim().starts_with("elseif ") {
+                            inside_quest_block = true;
+                            inside_quest_block_assign = true;
                         }
-                        _ => None
-                    };
-                    let Some(final_dialogue_line) = line_val else{
-                        return cap[0].to_string();
-                    };
-                    trim_after = !is_all_script_instruction;
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
-                        String::new()
-                    };
-                    format!("{prefix}\nPopup: {final_dialogue_line}\n")
-                }
-                "IsQuestAccepted" | "IsQuestCompleted" | "GetQuestSequence" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let quest_link_opt = arg_list.next();
-                    if let Some(LuaValue::Integer(index)) =
-                        get_self_var_value(&state, &quest_link_opt)
-                        && let Ok(Some(quest_name)) = database.get_quest_name(index)
-                    {
-                        format!("{var_caller}:{func}({})", quest_name)
-                    } else {
+                        if let Some(LuaValue::Integer(index)) =
+                            get_self_var_value(&state, &quest_link_opt)
+                            && let Ok(Some(quest_name)) = database.get_quest_name(index)
+                        {
+                            format!("{var_caller}:{func}(\"{}\")", quest_name)
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
+                    "IsInstanceContentCompleted" => {
+                        if line.trim().starts_with("if ") || line.trim().starts_with("elseif ") {
+                            inside_quest_block = true;
+                            inside_quest_block_assign = true;
+                        }
                         cap[0].to_string()
                     }
-                }
-                "PlayBGM" => {
-                    let mut arg_list = arg_list_ls.into_iter();
-                    let bgm_link_opt = arg_list.next();
-                    trim_after = !is_all_script_instruction;
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
-                        String::new()
-                    };
-                    let bgm_name_final;
-                    if let Some(LuaValue::Integer(index)) =
-                        get_self_var_value(&state, &bgm_link_opt)
-                        && let Ok(Some(bgm_name)) = database.get_bgm_link(index)
-                    {
-                        bgm_name_final = bgm_name;
-                    } else {
-                        bgm_name_final = bgm_link_opt.unwrap_or_default();
+                    "PlayBGM" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let bgm_link_opt = arg_list.next();
+                        trim_after = detail_level != DetailLevel::FullScript;
+                        let prefix = if detail_level == DetailLevel::FullScript {
+                            format!("{}\n", cap[0].to_string())
+                        } else {
+                            String::new()
+                        };
+                        let bgm_name_final;
+                        if let Some(LuaValue::Integer(index)) =
+                            get_self_var_value(&state, &bgm_link_opt)
+                            && let Ok(Some(bgm_name)) = database.get_bgm_link(index)
+                        {
+                            bgm_name_final = bgm_name;
+                        } else {
+                            bgm_name_final = bgm_link_opt.unwrap_or_default();
+                        }
+                        format!("{prefix}\n[BGM: \"{0}\"]\n", bgm_name_final)
                     }
-                    format!("{prefix}\n[BGM: \"{0}\"]\n", bgm_name_final)
-                }
-                "FadeIn" => {
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
+                    "FadeIn" => {
+                        inside_cutscene = true;
+                        let prefix = if detail_level == DetailLevel::FullScript {
+                            format!("{}\n", cap[0].to_string())
+                        } else {
+                            String::new()
+                        };
+                        temp_dialogue_line = "-cutscene start".to_string();
+                        format!("{prefix}\n-cutscene start")
+                    }
+                    "FadeOut" => {
+                        let prefix = if detail_level == DetailLevel::FullScript {
+                            cap[0].to_string()
+                        } else {
+                            String::new()
+                        };
+                        if inside_yesno_block {
+                            return prefix;
+                        }
+                        if inside_cutscene {
+                            temp_dialogue_line = "-cutscene end".to_string();
+                            inside_cutscene = false;
+                            format!("{prefix}\n-cutscene end")
+                        } else {
+                            prefix
+                        }
+                    }
+                    "QuestAccepted" => {
+                        let prefix = if detail_level == DetailLevel::FullScript {
+                            format!("{}\n", cap[0].to_string())
+                        } else {
+                            String::new()
+                        };
+                        temp_dialogue_line = "-quest accepted".to_string();
+                        format!("{prefix}\n-quest accepted")
+                    }
+                    "QuestCompleted" => {
+                        let prefix = if detail_level == DetailLevel::FullScript {
+                            format!("{}\n", cap[0].to_string())
+                        } else {
+                            String::new()
+                        };
+                        temp_dialogue_line = "-quest complete".to_string();
+                        format!("{prefix}\n-quest complete")
+                    }
+                    s if IGNORE_LOOKUP.contains(s) && detail_level != DetailLevel::FullScript => {
+                        trim_after = true;
                         String::new()
-                    };
-                    format!("{prefix}\n-cutscene start")
+                    }
+                    _ => cap[0].to_string(),
                 }
-                "FadeOut" => {
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
-                        String::new()
-                    };
-                    format!("{prefix}\n-cutscene end")
-                }
-                "QuestAccepted" => {
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
-                        String::new()
-                    };
-                    format!("{prefix}\n-quest accepted")
-                }
-                "QuestCompleted" => {
-                    let prefix = if is_all_script_instruction {
-                        format!("{}\n", cap[0].to_string())
-                    } else {
-                        String::new()
-                    };
-                    format!("{prefix}\n-quest complete")
-                }
-                s if IGNORE_LOOKUP.contains(s) && !is_all_script_instruction => {
-                    trim_after = true;
-                    String::new()
-                }
-                _ => {
-                    cap[0].to_string()
-                }
-            }
-        });
+            });
+
         if trim_after {
             temp_line = replace_res.trim().to_string();
             trim_after = false;
         } else {
             temp_line = replace_res.to_string();
         }
+
         for cap in regex_self_var.captures_iter(&temp_line) {
             let (_, [param]) = cap.extract();
             let mut pv = None;
@@ -1228,6 +1346,22 @@ pub fn process(
         for (pre, rep) in temp_transform {
             temp_line = temp_line.replace(&rep, &pre);
         }
+
+        if let Some(cap_cond) = regex_if.captures(&temp_line) {
+            temp_quest_condition = cap_cond["conditions"].to_string();
+            let mut iftype = cap_cond["if_type"].to_string();
+            if iftype == "elseif" {
+                iftype = "else if".to_string();
+            }
+            if inside_quest_block {
+                temp_dialogue_line = format!("> {iftype} {temp_quest_condition}");
+            }
+        }
+
+        if detail_level == DetailLevel::NoScript {
+            temp_line = temp_dialogue_line;
+        }
+
         if temp_line != "" {
             output.push(temp_line);
         }
@@ -1423,6 +1557,7 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
                     Ok(None)
                 }
             }
+            _ if state.self_var_map.contains_key(func) => Ok(state.self_var_map.get(func).cloned()),
             _ => Ok(None),
         }
     } else if let Some(v) = get_self_var_value(state, &Some(val.to_string())) {
@@ -1456,7 +1591,8 @@ fn get_cutscene_text_by_index(
     excel: &Excel,
     database: &Database,
     i: i32,
-    is_all_script_instruction: bool,
+    detail_level: DetailLevel,
+    arg_list: &Vec<(String, Option<String>)>,
 ) -> Result<Vec<String>> {
     let Some(cut_path) = database.get_cutscene_path(i).ok().flatten() else {
         return Ok(Vec::new());
@@ -1466,7 +1602,8 @@ fn get_cutscene_text_by_index(
         excel,
         database,
         &cut_path,
-        is_all_script_instruction,
+        detail_level,
+        arg_list,
     )
 }
 
@@ -1475,18 +1612,25 @@ fn get_cutscene_text_by_path(
     excel: &Excel,
     database: &Database,
     cut_path: &str,
-    is_all_script_instruction: bool,
+    detail_level: DetailLevel,
+    arg_list: &Vec<(String, Option<String>)>,
 ) -> Result<Vec<String>> {
     let Ok(cs) = CutsceneDialogue::from_path(ironworks, &format!("cut/{cut_path}.cutb")) else {
         return Ok(Vec::new());
     };
 
-    let Ok(dialogue_list) = cs.get(database, excel, is_all_script_instruction) else {
+    let Ok(dialogue_list) = cs.get(database, excel, detail_level, arg_list) else {
         return Ok(Vec::new());
     };
-    let mut filtered = vec![cut_path.to_string()];
+    if dialogue_list.len() == 0 {
+        return Ok(Vec::new());
+    }
+    let mut filtered = Vec::new();
+    if detail_level != DetailLevel::NoScript {
+        filtered.push(cut_path.to_string());
+    }
+    filtered.push("-cutscene start".to_string());
     let mut last_was_newline = false;
-
     for s in dialogue_list {
         let is_newline = s.trim().is_empty();
 
@@ -1500,5 +1644,6 @@ fn get_cutscene_text_by_path(
             last_was_newline = false;
         }
     }
+    filtered.push("-cutscene end".to_string());
     Ok(filtered)
 }
