@@ -84,28 +84,28 @@ impl Write for CGWikiWriter {
         if usage == ColorUsage::Foreground {
             match color {
                 ColorCategory::Hint => {
-                    self.write_str("<span class=\"color-hint\">")?;
+                    // self.write_str("<span class=\"color-hint\">")?;
                 }
                 ColorCategory::QuestSync => {
-                    self.write_str("<span class=\"color-questsync\">")?;
+                    // self.write_str("<span class=\"color-questsync\">")?;
                 }
                 ColorCategory::Adjusted => {
-                    self.write_str("<span class=\"color-adjusted\">")?;
+                    // self.write_str("<span class=\"color-adjusted\">")?;
                 }
                 ColorCategory::Ascian => {
-                    self.write_str("<span class=\"color-ascian\">")?;
+                    // self.write_str("<span class=\"color-ascian\">")?;
                 }
                 ColorCategory::White => {
-                    self.write_str("<span class=\"color-cosmicquest\">")?;
+                    // self.write_str("<span class=\"color-cosmicquest\">")?;
                 }
                 ColorCategory::Orange => {
-                    self.write_str("{{colorize|```")?;
+                    // self.write_str("{{colorize|```")?;
                 }
                 ColorCategory::Yellow | ColorCategory::Accompany => {
-                    self.write_str("{{colorize|``")?;
+                    // self.write_str("{{colorize|``")?;
                 }
                 ColorCategory::Green => {
-                    self.write_str("{{colorize|`")?;
+                    // self.write_str("{{colorize|`")?;
                 }
                 _ => {}
             }
@@ -118,28 +118,28 @@ impl Write for CGWikiWriter {
         if usage == ColorUsage::Foreground {
             match self.color_category {
                 ColorCategory::Hint => {
-                    self.write_str("</span>")?;
+                    // self.write_str("</span>")?;
                 }
                 ColorCategory::QuestSync => {
-                    self.write_str("</span>")?;
+                    // self.write_str("</span>")?;
                 }
                 ColorCategory::Adjusted => {
-                    self.write_str("</span>")?;
+                    // self.write_str("</span>")?;
                 }
                 ColorCategory::Ascian => {
-                    self.write_str("</span>")?;
+                    // self.write_str("</span>")?;
                 }
                 ColorCategory::White => {
-                    self.write_str("</span>")?;
+                    // self.write_str("</span>")?;
                 }
                 ColorCategory::Orange => {
-                    self.write_str("```}}")?;
+                    // self.write_str("```}}")?;
                 }
                 ColorCategory::Yellow | ColorCategory::Accompany => {
-                    self.write_str("``}}")?;
+                    // self.write_str("``}}")?;
                 }
                 ColorCategory::Green => {
-                    self.write_str("`}}")?;
+                    // self.write_str("`}}")?;
                 }
                 _ => {}
             }
