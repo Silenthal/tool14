@@ -1230,6 +1230,18 @@ pub fn process(
                             cap[0].to_string()
                         }
                     }
+                    "IsItemsEquipped" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let item_link = arg_list.next();
+                        if let Some(LuaValue::Integer(index)) =
+                            get_self_var_value(&state, &item_link)
+                            && let Ok(Some(item_name)) = database.get_item_name(index)
+                        {
+                            format!("{var_caller}:{func}(\"{}\")", item_name)
+                        } else {
+                            cap[0].to_string()
+                        }
+                    }
                     "IsInstanceContentCompleted" => {
                         if line.trim().starts_with("if ") || line.trim().starts_with("elseif ") {
                             inside_quest_block = true;

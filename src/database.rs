@@ -97,6 +97,17 @@ impl Database {
         }
     }
 
+    pub fn get_item_name(&self, id: i32) -> Result<Option<String>> {
+        if id == 0 {
+            return Ok(None);
+        }
+        match id {
+            1..65536 => self.get_name_in_table("Item", "Name", id),
+            2000000..3000000 => self.get_name_in_table("EventItem", "Name", id),
+            _ => Ok(None),
+        }
+    }
+
     pub fn get_item_qty_desc(
         &self,
         id: i32,
