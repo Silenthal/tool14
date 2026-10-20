@@ -12,7 +12,7 @@ use ironworks::{
     file::{
         File,
         cutb::{Cutscene, Node},
-        layer::{HelperKind, InstanceData, InstanceKind},
+        layer::{HelperKind, InstanceData, InstanceKind, Transform},
         tmb::{CommandKind, Condition, Item, Track},
     },
 };
@@ -120,14 +120,16 @@ impl CutsceneDialogue {
             }
         }
         let mut info_list: Vec<String> = Vec::new();
+        let mut var_list: Vec<String> = Vec::new();
 
         for participant in participant_list {
             let p_id = participant.id() & 0xFFFFFF;
-            // let pos_str = get_pos(&participant.transform());
+            let pos_str = get_pos(&participant.transform());
             let InstanceData::HelperObject(help_obj) = participant.data() else {
                 continue;
             };
-            // let mut extra = String::new();
+            let mut extra = String::new();
+            let var_name;
             match help_obj.kind() {
                 HelperKind::Player => {
                     participant_to_var.insert(participant.id(), "player".to_string());
@@ -144,27 +146,37 @@ impl CutsceneDialogue {
                             .filter(|c| c.is_alphanumeric())
                             .flat_map(|c| c.to_lowercase())
                             .collect();
-                        participant_to_var
-                            .insert(participant.id(), format!("npc_{p_id:02}_{}", npc_name_key));
-                        // extra = format!("EventNPC \"{}\"", npc_name_key);
+                        var_name = format!("npc_{p_id:02}_{}", npc_name_key);
+                        participant_to_var.insert(participant.id(), var_name.clone());
+                        extra = format!("EventNPC {} ({:?})", var_name, help_obj);
                     } else {
-                        participant_to_var.insert(participant.id(), format!("npc_{p_id:02}"));
-                        // extra = format!("EventNPC #{}", help_obj.base_id());
+                        let var_name = format!("npc_{p_id:02}");
+                        participant_to_var.insert(participant.id(), var_name.clone());
+                        extra = format!(
+                            "EventNPC {} #{} ({:?})",
+                            var_name,
+                            help_obj.base_id(),
+                            help_obj
+                        );
                     }
                 }
                 HelperKind::Weapon => {
-                    participant_to_var
-                        .insert(participant.id(), format!("weapon_{p_id:02}_{p_id:02}"));
-                    // extra = format!("Weapon {:?}", help_obj.weapon());
+                    var_name = format!("weapon_{p_id:02}_{p_id:02}");
+                    participant_to_var.insert(participant.id(), var_name.clone());
+                    extra = format!("Weapon {} {:?}", var_name, help_obj.weapon());
                 }
                 HelperKind::None => {
-                    participant_to_var.insert(participant.id(), format!("obj_{p_id:02}_{p_id:02}"));
+                    var_name = format!("obj_{p_id:02}_{p_id:02}");
+                    participant_to_var.insert(participant.id(), var_name.clone());
+                    extra = format!("None {} ({:?})", var_name, help_obj);
                 }
                 _ => {
-                    participant_to_var.insert(participant.id(), format!("obj_{p_id:02}_{p_id:02}"));
-                    // extra = format!("{:?}", participant.data());
+                    var_name = format!("obj_{p_id:02}_{p_id:02}");
+                    participant_to_var.insert(participant.id(), var_name.clone());
+                    extra = format!("Unk {} {:?}", var_name, participant.data());
                 }
             }
+            var_list.push(extra);
         }
         let regex_dialogue_alt_speaker = Regex::new(r"^\(-([^-]+)-\).*$")?;
         let mut temp_info_list = Vec::new();
@@ -909,7 +921,15 @@ impl CutsceneDialogue {
             }
         }
 
-        Ok(info_list)
+        let mut out_list: Vec<String> = Vec::new();
+        if info_list.len() > 0 {
+            if detail_level == DetailLevel::FullScript {
+                out_list.push("Vars:".to_string());
+                out_list.extend(var_list);
+            }
+            out_list.extend(info_list);
+        }
+        Ok(out_list)
     }
 }
 
@@ -1223,12 +1243,12 @@ fn get_pos_f(t: [f32; 3], r: [f32; 3], s: [f32; 3]) -> String {
     pos_str
 }
 
-// fn get_pos(tf: &Transform) -> String {
-//     let t = tf.translation();
-//     let r = tf.rotation();
-//     let s = tf.scale();
-//     get_pos_f(t, r, s)
-// }
+fn get_pos(tf: &Transform) -> String {
+    let t = tf.translation();
+    let r = tf.rotation();
+    let s = tf.scale();
+    get_pos_f(t, r, s)
+}
 
 fn is_zero(vec3: [f32; 3]) -> bool {
     let eps = 1e-6;
