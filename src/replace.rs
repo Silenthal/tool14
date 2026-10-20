@@ -11,6 +11,7 @@ use crate::{
         item_detail::ItemDetail,
         lua_value::{LuaFunction, LuaValue},
         quest::Quest,
+        replace_result::ReplaceResult,
     },
 };
 use anyhow::Result;
@@ -242,7 +243,7 @@ pub fn process(
     lines: &Vec<String>,
     detail_level: DetailLevel,
     func_report: &mut HashMap<i32, HashMap<String, i32>>,
-) -> Result<Vec<String>> {
+) -> Result<ReplaceResult> {
     let quest_tag = &quest.quest_id[..9];
     let regex_top_level = Regex::new(format!(r"^{}.(\w+) = (.*)$", &quest_tag).as_str())?;
     let regex_assign = Regex::new(r"^\s+(?:local )?(.*) = (.*)$")?;
@@ -258,7 +259,7 @@ pub fn process(
     let regex_if = Regex::new(r"^\s*(?<if_type>(?:else)?if) (?<conditions>.*) then$")?;
     let mut item_hand_over_list: Vec<(i32, String)> = Vec::new();
     let mut item_listener_id = 0;
-    let mut output: Vec<String> = Vec::new();
+    let mut output: ReplaceResult = ReplaceResult::new();
     let mut state: State = State {
         database,
         player_var: String::new(),
@@ -430,7 +431,7 @@ pub fn process(
             Ok(Some(s)) => s,
             _ => k.to_string(),
         };
-        output.push(format!("{listener}: {item_line}"));
+        output.handover.push(format!("[{listener}] {item_line}"));
     }
 
     for line in lines {
@@ -447,9 +448,9 @@ pub fn process(
                 skip_to_end = false;
             } else {
                 if detail_level != DetailLevel::NoScript {
-                    output.push(line.clone());
+                    output.script.push(line.clone());
                 }
-                output.push(String::new());
+                output.script.push(String::new());
             }
             continue;
         } else if skip_to_end {
@@ -461,7 +462,7 @@ pub fn process(
                 inside_quest_block = false;
                 inside_quest_block_assign = false;
                 if detail_level == DetailLevel::NoScript {
-                    output.push("---".to_string());
+                    output.script.push("---".to_string());
                     continue;
                 }
             }
@@ -492,7 +493,7 @@ pub fn process(
                 }
             }
             if detail_level != DetailLevel::NoScript {
-                output.push(line.clone());
+                output.script.push(line.clone());
             }
             continue;
         }
@@ -1375,7 +1376,7 @@ pub fn process(
         }
 
         if temp_line != "" {
-            output.push(temp_line);
+            output.script.push(temp_line);
         }
     }
     Ok(output)

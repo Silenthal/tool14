@@ -8,4 +8,5 @@ pub mod quest;
 pub mod quest_battle;
 pub mod quest_listener_param;
 pub mod quest_param;
+pub mod replace_result;
 pub mod todo_param;

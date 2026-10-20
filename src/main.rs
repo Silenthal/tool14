@@ -139,21 +139,8 @@ fn print_quest(
         }
         output.push_str("\n");
     }
-    output.push_str("==Dialogue==\n{{Dialogue|<nowiki>\n===Accepting the quest===\n");
-    for i in 0..24 {
-        let tag = format!("TEXT_{}_TODO_{i:02}", quest.quest_id.to_uppercase());
-        if let Some(rf) = dialogue_map
-            .get(&tag)
-            .and_then(|x| x.trim().strip_suffix("."))
-        {
-            if rf == "" {
-                break;
-            } else {
-                output.push_str(format!("==={}===\n", rf).as_str());
-            }
-        }
-    }
-    let lines = replace::process(
+
+    let replace_result = replace::process(
         &excel,
         &ironworks,
         &database,
@@ -163,8 +150,30 @@ fn print_quest(
         detail_level,
         func_report,
     )?;
+
+    output.push_str("==Dialogue==\n");
+
+    for i in 0..24 {
+        let tag = format!("TEXT_{}_TODO_{i:02}", quest.quest_id.to_uppercase());
+        if let Some(rf) = dialogue_map
+            .get(&tag)
+            .and_then(|x| x.trim().strip_suffix("."))
+        {
+            if rf == "" {
+                break;
+            } else {
+                output.push_str(format!("<!-- ==={}=== -->\n", rf).as_str());
+            }
+        }
+    }
+
+    for handover in replace_result.handover {
+        output.push_str(format!("<!-- {} -->\n", handover).as_str());
+    }
+
+    output.push_str("{{Dialogue|<nowiki>\n===Accepting the quest===\n");
     let mut last_was_newline = false;
-    for line in lines {
+    for line in replace_result.script {
         let is_newline = line.trim().is_empty();
 
         if is_newline {
