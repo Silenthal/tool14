@@ -193,7 +193,7 @@ fn print_quest(
         (Regex::new(r"\nend\n\n(\n)+")?, "\nend\n\n"),
         (Regex::new(r"> if.*\n---\n")?, ""),
         (Regex::new(r"\n\n+")?, "\n\n"),
-        (Regex::new(r"\s+\n")?, "\n"),
+        (Regex::new(r" +\n")?, "\n"),
     ];
     for (r, replace) in regex_replace_list {
         output = r.replace_all(&output, replace).into_owned();
