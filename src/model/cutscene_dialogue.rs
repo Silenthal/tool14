@@ -319,6 +319,7 @@ impl CutsceneDialogue {
                                     for a in answer_list {
                                         dialogue_str += &format!("\n> {}", a);
                                     }
+                                    dialogue_str += "\n---";
                                 }
                             }
                             _ => {}
