@@ -4,6 +4,7 @@ mod evaluate;
 pub mod formatter;
 mod from_expressions;
 mod handle_macro;
+pub mod input;
 pub mod lookup;
 mod operator;
 mod state;

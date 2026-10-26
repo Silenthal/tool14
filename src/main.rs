@@ -145,7 +145,6 @@ fn print_quest(
         &ironworks,
         &database,
         &quest,
-        &dialogue_map,
         &script.lines,
         detail_level,
         func_report,

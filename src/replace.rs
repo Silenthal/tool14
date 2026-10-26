@@ -4,6 +4,10 @@ use std::{
 };
 
 use crate::{
+    cgwiki::{
+        input::Input,
+        lookup::sheet_lookup::lookup_sheet_input,
+    },
     database::Database,
     detail_level::DetailLevel,
     model::{
@@ -15,11 +19,13 @@ use crate::{
     },
 };
 use anyhow::Result;
-use ironworks::{Ironworks, excel::Excel};
+use ironworks::{Ironworks, excel::Excel, sestring::format::Value};
 use levenshtein::levenshtein;
 use regex::Regex;
 
 struct State<'a> {
+    excel: &'a Excel,
+    quest: &'a Quest,
     database: &'a Database,
     player_var: String,
     target_var: String,
@@ -239,7 +245,6 @@ pub fn process(
     ironworks: &Ironworks,
     database: &Database,
     quest: &Quest,
-    dialogue_dict: &HashMap<String, String>,
     lines: &Vec<String>,
     detail_level: DetailLevel,
     func_report: &mut HashMap<i32, HashMap<String, i32>>,
@@ -261,6 +266,8 @@ pub fn process(
     let mut item_listener_id = 0;
     let mut output: ReplaceResult = ReplaceResult::new();
     let mut state: State = State {
+        excel,
+        quest,
         database,
         player_var: String::new(),
         target_var: String::new(),
@@ -307,16 +314,6 @@ pub fn process(
         }
     }
 
-    for (k, v) in dialogue_dict {
-        state
-            .self_var_map
-            .insert(k.clone(), LuaValue::String(v.clone()));
-    }
-
-    // for (k, v) in &database.get_quest_define_map(quest.number)?{
-    //     state.self_var_map.insert(k.clone(), LuaValue::Integer(*v));
-    // }
-
     for (k, v) in &database.quest_sys_define_map {
         state.self_var_map.insert(k.clone(), LuaValue::Integer(*v));
     }
@@ -359,7 +356,7 @@ pub fn process(
             item_listener_id = if let Ok(i) = listener_id_s.parse::<i32>() {
                 i
             } else if let Some(LuaValue::Integer(it)) =
-                get_self_var_value(&state, &Some(listener_id_s.to_string()))
+                get_self_var_value(&state, &Some(listener_id_s.to_string()), None)
             {
                 it
             } else {
@@ -374,7 +371,7 @@ pub fn process(
             let item_name_index = if let Ok(i) = item_name_s.parse::<i32>() {
                 i
             } else if let Some(LuaValue::Integer(it)) =
-                get_self_var_value(&state, &Some(item_name_s.to_string()))
+                get_self_var_value(&state, &Some(item_name_s.to_string()), None)
             {
                 it
             } else {
@@ -595,7 +592,7 @@ pub fn process(
                         && let Some(n) = target_name
                     {
                         state.local_var_map.insert(var, LuaValue::String(n.clone()));
-                    } else if let Some(lv) = eval_func(database, &state, &val)? {
+                    } else if let Some(lv) = eval_func(database, &state, &val, None)? {
                         if inside_quest_block && inside_quest_block_assign {
                             let a = state.local_var_map.get(&var);
                             let b = &lv;
@@ -674,12 +671,18 @@ pub fn process(
                         let _ = arg_list.next(); // action
                         let _ = arg_list.next(); // lip 1
                         let _ = arg_list.next(); // lip 2?
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            input.add_local_parameter(param_num, Value::String(next.clone()));
+                            param_num += 1;
+                        }
                         // let local_dialogue_args: Vec<String> = arg_list.collect();
                         if let Some(speaker_key) = get_id(&dialogue_key_opt) {
                             let mut final_speaker = speaker_key.clone();
                             let mut alt_name_speaker = String::new();
                             if let Some(LuaValue::String(mut final_dialogue_line)) =
-                                get_self_var_value(&state, &dialogue_key_opt)
+                                get_self_var_value(&state, &dialogue_key_opt, Some(&input))
                             {
                                 // If this is the *first* talk, it could be from the quest assigner
                                 if var_caller == state.target_var
@@ -749,12 +752,18 @@ pub fn process(
                         let _ = arg_list.next(); // action
                         let _ = arg_list.next(); // lip 1
                         let _ = arg_list.next(); // lip 2?
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            input.add_local_parameter(param_num, Value::String(next.clone()));
+                            param_num += 1;
+                        }
                         // let local_dialogue_args: Vec<String> = arg_list.collect();
                         if let Some(speaker_key) = get_id(&dialogue_key_opt) {
                             let mut final_speaker = speaker_key.clone();
                             let mut alt_name_speaker = String::new();
                             if let Some(LuaValue::String(mut final_dialogue_line)) =
-                                get_self_var_value(&state, &dialogue_key_opt)
+                                get_self_var_value(&state, &dialogue_key_opt, Some(&input))
                             {
                                 // If this is the *first* talk, it could be from the quest assigner
                                 if var_caller == state.target_var
@@ -822,12 +831,18 @@ pub fn process(
                         let _ = arg_list.next(); // design
                         let _ = arg_list.next(); // action
                         let _ = arg_list.next(); // time
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            input.add_local_parameter(param_num, Value::String(next.clone()));
+                            param_num += 1;
+                        }
                         // let local_dialogue_args: Vec<String> = arg_list.collect();
                         if let Some(speaker_key) = get_id(&dialogue_key_opt) {
                             let mut final_speaker = speaker_key.clone();
                             let mut alt_name_speaker = String::new();
                             if let Some(LuaValue::String(mut final_dialogue_line)) =
-                                get_self_var_value(&state, &dialogue_key_opt)
+                                get_self_var_value(&state, &dialogue_key_opt, Some(&input))
                             {
                                 // If this is the *first* talk, it could be from the quest assigner
                                 if var_caller == state.target_var
@@ -896,12 +911,18 @@ pub fn process(
                         let _ = arg_list.next();
                         let _ = arg_list.next();
                         let _ = arg_list.next(); // time
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            input.add_local_parameter(param_num, Value::String(next.clone()));
+                            param_num += 1;
+                        }
                         // let local_dialogue_args: Vec<String> = arg_list.collect();
                         if let Some(speaker_key) = get_id(&dialogue_key_opt) {
                             let mut final_speaker = speaker_key.clone();
                             let mut alt_name_speaker = String::new();
                             if let Some(LuaValue::String(mut final_dialogue_line)) =
-                                get_self_var_value(&state, &dialogue_key_opt)
+                                get_self_var_value(&state, &dialogue_key_opt, Some(&input))
                             {
                                 // If this is the *first* talk, it could be from the quest assigner
                                 if var_caller == state.target_var
@@ -967,12 +988,18 @@ pub fn process(
                         let _ = arg_list.next(); // player
                         let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
                         let _ = arg_list.next(); // time
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            input.add_local_parameter(param_num, Value::String(next.clone()));
+                            param_num += 1;
+                        }
                         // let local_dialogue_args: Vec<String> = arg_list.collect();
                         if let Some(speaker_key) = get_id(&dialogue_key_opt) {
                             let mut final_speaker = speaker_key.clone();
                             let mut alt_name_speaker = String::new();
                             if let Some(LuaValue::String(mut final_dialogue_line)) =
-                                get_self_var_value(&state, &dialogue_key_opt)
+                                get_self_var_value(&state, &dialogue_key_opt, Some(&input))
                             {
                                 // If this is the *first* talk, it could be from the quest assigner
                                 if var_caller == state.target_var
@@ -1037,10 +1064,15 @@ pub fn process(
                         let mut arg_list = arg_list_ls.into_iter();
                         let dialogue_key_opt = get_self_var_name(&arg_list.next()); // actual line
                         let _ = arg_list.next(); // true to close dialog box
-                        // let local_dialogue_args: Vec<String> = arg_list.collect();
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            input.add_local_parameter(param_num, Value::String(next.clone()));
+                            param_num += 1;
+                        }
                         if let Some(_) = get_id(&dialogue_key_opt) {
                             let Some(LuaValue::String(final_dialogue_line)) =
-                                get_self_var_value(&state, &dialogue_key_opt)
+                                get_self_var_value(&state, &dialogue_key_opt, Some(&input))
                             else {
                                 return cap[0].to_string();
                             };
@@ -1062,14 +1094,15 @@ pub fn process(
                         let question_opt = get_self_var_name(&arg_list.next()); // actual line
                         let final_dialogue_line: String;
                         let Ok(Some(LuaValue::String(question))) =
-                            eval_func(&database, &state, &question_opt.unwrap())
+                            eval_func(&database, &state, &question_opt.unwrap(), None)
                         else {
                             return cap[0].to_string();
                         };
                         let mut line_list = vec![format!("Question: {question}")];
                         for answers in arg_list {
                             if let Some(answer_key) = get_self_var_name(&Some(answers)) {
-                                let lookup = get_self_var_value(&state, &Some(answer_key.clone()));
+                                let lookup =
+                                    get_self_var_value(&state, &Some(answer_key.clone()), None);
                                 if let Some(LuaValue::String(answer_s)) = lookup {
                                     line_list.push(format!("> {answer_s}"));
                                 }
@@ -1085,7 +1118,7 @@ pub fn process(
                         let question_opt = get_self_var_name(&arg_list.next()); // actual line
                         let final_dialogue_line: String;
                         let Some(LuaValue::String(question)) =
-                            get_self_var_value(&state, &question_opt)
+                            get_self_var_value(&state, &question_opt, None)
                         else {
                             return cap[0].to_string();
                         };
@@ -1097,7 +1130,7 @@ pub fn process(
                         // Note: only works for below 200 - tables InstanceContent and InstanceContentTextData have text with no NPCs attached
                         inside_yesno_block = true;
                         let mut arg_list = arg_list_ls.into_iter();
-                        let question_opt = get_self_var_value(&state, &arg_list.next());
+                        let question_opt = get_self_var_value(&state, &arg_list.next(), None);
                         if let Some(LuaValue::Integer(i)) = &question_opt
                             && let Some(qb) = database.get_quest_battle(*i).ok().flatten()
                         {
@@ -1149,7 +1182,7 @@ pub fn process(
                     "PlayCutScene" => {
                         let ct = arg_list_ls.len();
                         let mut arg_list = arg_list_ls.into_iter();
-                        let log_key_opt = get_self_var_value(&state, &arg_list.next());
+                        let log_key_opt = get_self_var_value(&state, &arg_list.next(), None);
                         let Some(LuaValue::Integer(cut_index)) = log_key_opt else {
                             return cap[0].to_string();
                         };
@@ -1192,13 +1225,27 @@ pub fn process(
                     }
                     "LogMessage" | "ScenarioMessage" => {
                         let mut arg_list = arg_list_ls.into_iter();
-                        let log_key_opt = get_self_var_value(&state, &arg_list.next());
+                        let key = &arg_list.next();
+                        let mut input = Input::new();
+                        let mut param_num = 1;
+                        while let Some(next) = arg_list.next() {
+                            if let Ok(Some(LuaValue::Integer(raw))) =
+                                eval_func(database, &state, &next, None)
+                            {
+                                input.add_local_parameter(param_num, Value::U32(raw as u32));
+                                param_num += 1;
+                            }
+                        }
+                        let log_key_opt = get_self_var_value(&state, key, Some(&input));
                         // let local_dialogue_args: Vec<String> = arg_list.collect();
                         let line_val = match log_key_opt {
-                            Some(LuaValue::Integer(log_key)) => database
-                                .get_name_in_table("LogMessage", "Text", log_key)
-                                .ok()
-                                .flatten(),
+                            Some(LuaValue::Integer(log_key)) => lookup_sheet_input(
+                                excel,
+                                Some(&input),
+                                "LogMessage",
+                                log_key as u32,
+                                "Text",
+                            ),
                             Some(LuaValue::String(s)) => Some(s),
                             _ => None,
                         };
@@ -1223,7 +1270,7 @@ pub fn process(
                             inside_quest_block_assign = true;
                         }
                         if let Some(LuaValue::Integer(index)) =
-                            get_self_var_value(&state, &quest_link_opt)
+                            get_self_var_value(&state, &quest_link_opt, None)
                             && let Ok(Some(quest_name)) = database.get_quest_name(index)
                         {
                             format!("{var_caller}:{func}(\"{}\")", quest_name)
@@ -1233,15 +1280,18 @@ pub fn process(
                     }
                     "IsItemsEquipped" => {
                         let mut arg_list = arg_list_ls.into_iter();
-                        let item_link = arg_list.next();
-                        if let Some(LuaValue::Integer(index)) =
-                            get_self_var_value(&state, &item_link)
-                            && let Ok(Some(item_name)) = database.get_item_name(index)
-                        {
-                            format!("{var_caller}:{func}(\"{}\")", item_name)
-                        } else {
-                            cap[0].to_string()
+                        let mut i_list = Vec::new();
+                        while let Some(item_link) = arg_list.next() {
+                            if let Some(LuaValue::Integer(index)) =
+                                get_self_var_value(&state, &Some(item_link.clone()), None)
+                                && let Ok(Some(item_name)) = database.get_item_name(index)
+                            {
+                                i_list.push(format!("\"{item_name}\""));
+                            } else {
+                                i_list.push(item_link.clone());
+                            }
                         }
+                        format!("{var_caller}:{func}({})", i_list.join(", "))
                     }
                     "IsInstanceContentCompleted" => {
                         if line.trim().starts_with("if ") || line.trim().starts_with("elseif ") {
@@ -1261,7 +1311,7 @@ pub fn process(
                         };
                         let bgm_name_final;
                         if let Some(LuaValue::Integer(index)) =
-                            get_self_var_value(&state, &bgm_link_opt)
+                            get_self_var_value(&state, &bgm_link_opt, None)
                             && let Ok(Some(bgm_name)) = database.get_bgm_link(index)
                         {
                             bgm_name_final = bgm_name;
@@ -1465,7 +1515,11 @@ fn get_self_var_name(key: &Option<String>) -> Option<String> {
         })
 }
 
-fn get_self_var_value(state: &State, key_opt: &Option<String>) -> Option<LuaValue> {
+fn get_self_var_value(
+    state: &State,
+    key_opt: &Option<String>,
+    input: Option<&Input>,
+) -> Option<LuaValue> {
     if let Some(key) = get_self_var_name(key_opt) {
         if let Ok(f) = key.parse::<i32>() {
             return Some(LuaValue::Integer(f));
@@ -1477,6 +1531,12 @@ fn get_self_var_value(state: &State, key_opt: &Option<String>) -> Option<LuaValu
             return Some(s.clone());
         } else if let Some(s) = state.local_var_map.get(&key) {
             return Some(s.clone());
+        } else if let Ok(Some(line)) =
+            state
+                .database
+                .get_quest_dialogue_line(state.excel, state.quest, input, &key)
+        {
+            return Some(LuaValue::String(line));
         } else if let Some(s) = state.database.quest_sys_define_map.get(&key) {
             return Some(LuaValue::Integer(*s));
         } else {
@@ -1487,7 +1547,12 @@ fn get_self_var_value(state: &State, key_opt: &Option<String>) -> Option<LuaValu
     }
 }
 
-fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<LuaValue>> {
+fn eval_func(
+    database: &Database,
+    state: &State,
+    val: &str,
+    input: Option<&Input>,
+) -> Result<Option<LuaValue>> {
     let regex_call = Regex::new(r"\s*(\w+):(\w+)\(([^\)]*)\)")?;
     if let Ok(val_i) = val.parse() {
         // Guess: if a number is in the range of a listener id, maybe it is a listener id
@@ -1546,7 +1611,7 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
                 {
                     return Ok(Some(LuaValue::String(npc_name)));
                 } else if let Some(LuaValue::Integer(level_link_i)) =
-                    get_self_var_value(state, &level_link_opt)
+                    get_self_var_value(state, &level_link_opt, input)
                     && let Some(npc_name) = database.get_level_ref(level_link_i)?
                 {
                     Ok(Some(LuaValue::String(npc_name)))
@@ -1562,7 +1627,7 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
                 {
                     Ok(Some(LuaValue::String(npc_name)))
                 } else if let Some(LuaValue::Integer(listener_i)) =
-                    get_self_var_value(state, &listener_link_opt)
+                    get_self_var_value(state, &listener_link_opt, input)
                     && let Some(npc_name) = database.get_name_from_id(listener_i)?
                 {
                     Ok(Some(LuaValue::String(npc_name.clone())))
@@ -1573,7 +1638,7 @@ fn eval_func(database: &Database, state: &State, val: &str) -> Result<Option<Lua
             _ if state.self_var_map.contains_key(func) => Ok(state.self_var_map.get(func).cloned()),
             _ => Ok(None),
         }
-    } else if let Some(v) = get_self_var_value(state, &Some(val.to_string())) {
+    } else if let Some(v) = get_self_var_value(state, &Some(val.to_string()), input) {
         if let LuaValue::Integer(val_i) = v {
             // Guess: if a number is in the range of a listener id, maybe it is a listener id
             if val_i >= 1000000

@@ -9,7 +9,10 @@ pub mod sheet_lookup {
         file::exh::{ColumnDefinition, ColumnKind},
     };
 
-    use crate::{cgwiki::formatter::format_string, exd_schema};
+    use crate::{
+        cgwiki::{formatter::format_string, input::Input, state::CGWState},
+        exd_schema,
+    };
 
     #[derive(Clone)]
     pub struct SheetDetail {
@@ -92,11 +95,50 @@ pub mod sheet_lookup {
     }
 
     pub fn lookup_sheet(
-        excel: &Excel,
+        state: &CGWState,
         sheet_name: &str,
         row_index: u32,
-        col_name: &String,
+        col_name: &str,
     ) -> Option<String> {
+        let sheet_detail = get_sheet_detail(state.excel, sheet_name)?;
+        let sheet = state.excel.sheet(sheet_name).ok()?;
+        let row = sheet.into_iter().find(|p| p.row_id() == row_index)?;
+
+        let (_, column_def) = sheet_detail
+            .col_def_list
+            .iter()
+            .find(|(x, _)| x == col_name)?;
+
+        println!("Check def: {:?}", column_def);
+
+        match row.field(column_def).ok()? {
+            Field::String(sestring) => {
+                return Some(format_string(state.excel, &sestring, state.input));
+            }
+            Field::I32(i) => return Some(i.to_string()), // HACK: AkatsukiNote lookup
+            _ => return None,
+            // Field::Bool(_) => return None,
+            // Field::I8(_) => return None,
+            // Field::I16(_) => return None,
+            // Field::I32(_) => return None,
+            // Field::I64(_) => return None,
+            // Field::U8(_) => return None,
+            // Field::U16(_) => return None,
+            // Field::U32(_) => return None,
+            // Field::U64(_) => return None,
+            // Field::F32(_) => return None,
+        }
+    }
+
+    pub fn lookup_sheet_input(
+        excel: &Excel,
+        input: Option<&Input>,
+        sheet_name: &str,
+        row_index: u32,
+        col_name: &str,
+    ) -> Option<String> {
+        let ti = Input::new();
+        let temp_input = input.unwrap_or(&ti);
         let sheet_detail = get_sheet_detail(excel, sheet_name)?;
         let sheet = excel.sheet(sheet_name).ok()?;
         let row = sheet.into_iter().find(|p| p.row_id() == row_index)?;
@@ -107,14 +149,14 @@ pub mod sheet_lookup {
             .find(|(x, _)| x == col_name)?;
 
         if let Field::String(sestring) = row.field(column_def).ok()? {
-            let res = format_string(excel, &sestring);
+            let res = format_string(excel, &sestring, &temp_input);
             return Some(res);
         } else {
             return None;
         }
     }
 
-    pub fn get_class_job(excel: &Excel, job_index: u32) -> Option<String> {
+    pub fn get_class_job(state: &CGWState, job_index: u32) -> Option<String> {
         {
             let cache = CLASS_JOB_CACHE.lock().unwrap();
             if !cache.is_empty() {
@@ -125,8 +167,8 @@ pub mod sheet_lookup {
                 }
             }
         }
-        let sd = get_sheet_detail(excel, "ClassJob")?;
-        let sheet = excel.sheet("ClassJob").ok()?;
+        let sd = get_sheet_detail(state.excel, "ClassJob")?;
+        let sheet = state.excel.sheet("ClassJob").ok()?;
         let (_, column_def) = sd.col_def_list.iter().find(|(x, _)| x == "NameEnglish")?;
         let mut temp_map: HashMap<u32, String> = HashMap::new();
         for row in sheet.into_iter() {
@@ -136,7 +178,7 @@ pub mod sheet_lookup {
             } else {
                 let field = row.field(column_def).ok()?;
                 if let Field::String(sestring) = field {
-                    let res = format_string(excel, &sestring);
+                    let res = format_string(state.excel, &sestring, state.input);
                     temp_map.insert(id, res.to_lowercase());
                 }
             }

@@ -6,7 +6,7 @@ use ironworks::{
 use rusqlite::{Connection, params};
 
 use crate::{
-    cgwiki::{formatter::format_string, lookup::sheet_lookup::get_sheet_detail},
+    cgwiki::{formatter::format_string, input::Input, lookup::sheet_lookup::get_sheet_detail},
     settings::Settings,
 };
 
@@ -85,6 +85,7 @@ pub fn import_or_create_tables(
 
         let sheet = excel.sheet(table_name)?;
         let mut new_table_insert_rows = Vec::new();
+        let temp_input = Input::new();
         for row in sheet.into_iter() {
             let mut row_data = vec![row.row_id().to_string(), row.subrow_id().to_string()];
             for (_, def) in &sheet_detail.col_def_list {
@@ -93,7 +94,7 @@ pub fn import_or_create_tables(
                     Field::String(value) => {
                         format!(
                             "\"{}\"",
-                            &format_string(&excel, &value).replace("\"", "\"\"")
+                            &format_string(&excel, &value, &temp_input).replace("\"", "\"\"")
                         )
                     }
                     Field::Bool(value) => {

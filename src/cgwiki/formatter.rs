@@ -1,4 +1,4 @@
-use crate::{cgwiki::state::CGWState, cgwiki::writer::CGWikiWriter};
+use crate::cgwiki::{input::Input, state::CGWState, writer::CGWikiWriter};
 use ironworks::{
     excel::Excel,
     sestring::{Error as SeStringError, MacroKind, MacroPayload, Payload, SeString},
@@ -6,10 +6,10 @@ use ironworks::{
 
 use crate::{cgwiki::handle_macro, cgwiki::string_process};
 
-pub fn format_string(excel: &Excel, sestring: &SeString) -> String {
+pub fn format_string(excel: &Excel, sestring: &SeString, input: &Input) -> String {
     let mut writer = CGWikiWriter::new();
 
-    let mut state = CGWState::new(&mut writer, excel);
+    let mut state = CGWState::new(&mut writer, excel, input);
 
     for payload in sestring.payloads() {
         match payload {

@@ -1,10 +1,12 @@
 use std::sync::LazyLock;
 use std::{collections::HashMap, fs, path::PathBuf};
 
+use crate::cgwiki::input::Input;
 use crate::database_import;
 use crate::settings;
 use anyhow::{Context, Result, anyhow};
 use ironworks::excel::{Excel, Field};
+use ironworks::file::exh::{ColumnDefinition, ColumnKind};
 use regex::Regex;
 use rusqlite::{Connection, params};
 
@@ -306,13 +308,49 @@ impl Database {
         let quest_sheet = excel.sheet(path_dialogue)?;
         let cols = quest_sheet.columns()?;
         let mut ret = HashMap::new();
+        let temp_input = Input::new();
         for row in quest_sheet {
             let key = row.field(cols.get(0).unwrap())?;
             let val = row.field(cols.get(1).unwrap())?;
             if let (Field::String(k), Field::String(v)) = (key, val) {
-                let k = format_string(excel, &k);
-                let v = format_string(excel, &v);
+                let k = format_string(excel, &k, &temp_input);
+                let v = format_string(excel, &v, &temp_input);
                 ret.insert(k, v);
+            }
+        }
+        Ok(ret)
+    }
+
+    pub fn get_quest_dialogue_line(
+        &self,
+        excel: &Excel,
+        quest: &Quest,
+        input: Option<&Input>,
+        key: &str,
+    ) -> Result<Option<String>> {
+        if quest.quest_id.len() != 15 {
+            return Err(anyhow!(
+                "Couldn't fetch dialogue map: quest ID {} is not 15 characters long",
+                quest.quest_id
+            ));
+        }
+        let folder = &quest.quest_id[10..13];
+        let path_dialogue = format!("quest/{}/{}", folder, quest.quest_id);
+        let quest_sheet = excel.sheet(path_dialogue)?;
+        let cols = quest_sheet.columns()?;
+        let mut ret = None;
+        for row in quest_sheet {
+            let key_field = row.field(cols.get(0).unwrap())?;
+            let val_field = row.field(cols.get(1).unwrap())?;
+            if let (Field::String(key_se), Field::String(val_se)) = (key_field, val_field) {
+                let ti = Input::new();
+                let temp_input = input.unwrap_or(&ti);
+                let key_sheet = format_string(excel, &key_se, temp_input);
+                if key == key_sheet {
+                    let val_sheet = format_string(excel, &val_se, temp_input);
+                    ret = Some(val_sheet);
+                    break;
+                }
             }
         }
         Ok(ret)
@@ -338,12 +376,13 @@ impl Database {
         let quest_sheet = excel.sheet(path)?;
         let cols = quest_sheet.columns()?;
         let mut ret = HashMap::new();
+        let temp_input = Input::new();
         for row in quest_sheet {
             let key = row.field(cols.get(0).unwrap())?;
             let val = row.field(cols.get(1).unwrap())?;
             if let (Field::String(k), Field::String(v)) = (key, val) {
-                let k = format_string(excel, &k);
-                let v = format_string(excel, &v);
+                let k = format_string(excel, &k, &temp_input);
+                let v = format_string(excel, &v, &temp_input);
                 ret.insert(k, v);
             }
         }

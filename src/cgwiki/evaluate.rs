@@ -1,6 +1,5 @@
-use crate::{
-    cgwiki::convert_value, cgwiki::formatter::format_sestring, cgwiki::state::CGWState,
-    cgwiki::writer::CGWikiWriter,
+use crate::cgwiki::{
+    convert_value, formatter::format_sestring, input::Input, state::CGWState, writer::CGWikiWriter,
 };
 use ironworks::sestring::{Error as SeStringError, Expression, SeString, format::Value};
 use time::OffsetDateTime;
@@ -30,8 +29,8 @@ pub fn evaluate_expression(
 
         Expression::GlobalNumber(inner) => convert_value::into_global_param(eval(inner)?)?,
         Expression::GlobalString(inner) => convert_value::into_global_param(eval(inner)?)?,
-        Expression::LocalNumber(inner) => convert_value::into_local_param(eval(inner)?)?,
-        Expression::LocalString(inner) => convert_value::into_local_param(eval(inner)?)?,
+        Expression::LocalNumber(inner) => convert_value::into_local_param(state, eval(inner)?)?,
+        Expression::LocalString(inner) => convert_value::into_local_param(state, eval(inner)?)?,
 
         Expression::Ge(left, right) => {
             convert_value::into_compare("GreaterThanOrEqualTo", eval(left)?, eval(right)?)?
@@ -61,7 +60,7 @@ pub fn evaluate_expression(
 
 fn evaluate_sestring(sestring: SeString, state: &CGWState) -> Result<Value, SeStringError> {
     let mut writer = CGWikiWriter::new();
-    let mut temp_state = CGWState::new(&mut writer, state.excel);
+    let mut temp_state = CGWState::new(&mut writer, state.excel, state.input);
     temp_state.time = state.time;
     format_sestring(sestring, &mut temp_state)?;
     writer.reset_style();

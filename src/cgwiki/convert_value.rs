@@ -41,9 +41,15 @@ pub fn into_global_param(value: Value) -> Result<Value, SeStringError> {
     }
 }
 
-pub fn into_local_param(value: Value) -> Result<Value, SeStringError> {
+pub fn into_local_param(state: &CGWState, value: Value) -> Result<Value, SeStringError> {
     match value {
-        Value::U32(u) => Ok(Value::String(format!("<Local({})>", u))),
+        Value::U32(u) => {
+            if let Some(val) = state.input.get_local_parameter(u) {
+                Ok(val.clone())
+            } else {
+                Ok(Value::String(format!("<Local({})>", u)))
+            }
+        }
         Value::String(s) => Ok(Value::String(format!("<Local_S(\"{}\")>", s))),
         Value::Unknown => Ok(Value::String("<Local_U(\"\")>".to_string())),
     }

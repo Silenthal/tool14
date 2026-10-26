@@ -232,7 +232,7 @@ pub fn r#if(
                         .2
                         .parse::<u32>()
                         .ok()
-                        .and_then(|f| sheet_lookup::get_class_job(state.excel, f))
+                        .and_then(|f| sheet_lookup::get_class_job(state, f))
                     {
                         write_custom_if_with_condition_tag(state, "IfClassJob", &job_name, &a1, &a2)
                     } else {
@@ -374,13 +374,29 @@ pub fn sheet(arguments: &mut Expressions, state: &mut CGWState) -> Result<(), Se
         let sheet_name: String = arg_list[0].clone().into();
         let row_index: String = arg_list[1].clone().into();
         let column_index: u32 = arg_list[2].clone().into();
-        let col_name: String = sheet_lookup::get_sheet_col(state.excel, &sheet_name, column_index)
-            .unwrap_or(column_index.to_string());
+        let mut col_name: String =
+            sheet_lookup::get_sheet_col(state.excel, &sheet_name, column_index)
+                .unwrap_or(column_index.to_string());
+        // HACK: AkatsukiNote lookup
+        if sheet_name == "AkatsukiNote" && col_name == "Unknown1" {
+            col_name = "ListName".to_string();
+        }
         let replace: Option<String>;
         if let Ok(idx) = row_index.parse::<u32>() {
-            let lookup_res = sheet_lookup::lookup_sheet(state.excel, &sheet_name, idx, &col_name);
+            let lookup_res = sheet_lookup::lookup_sheet(state, &sheet_name, idx, &col_name);
+            println!("Second: {}, {}, {:?}", sheet_name, col_name, lookup_res);
             if let Some(x) = lookup_res {
-                replace = Some(x)
+                // HACK: AkatsukiNote lookup
+                if sheet_name == "AkatsukiNote"
+                    && col_name == "ListName"
+                    && let Ok(name_index) = x.parse::<u32>()
+                    && let Some(second_lookup) =
+                        sheet_lookup::lookup_sheet(state, "AkatsukiNoteString", name_index, "Text")
+                {
+                    replace = Some(second_lookup)
+                } else {
+                    replace = Some(x)
+                }
             } else {
                 replace = None
             }
