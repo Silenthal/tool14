@@ -691,16 +691,16 @@ pub fn process(
                                     final_speaker = name_ref.clone();
                                     clear_target_name = true;
                                 }
-                                // If var was assigned as the listener before, use that name
-                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
-                                    final_speaker = speaker.clone();
-                                }
                                 // If var was just assigned a string by bind/create char at some point, use that name
                                 else if let Some(LuaValue::String(x)) =
                                     state.local_var_map.get(var_caller)
                                 {
                                     state.var_to_name.insert(var_caller.to_string(), x.clone());
                                     final_speaker = x.clone();
+                                }
+                                // If var was assigned as the listener before, use that name
+                                else if let Some(speaker) = state.var_to_name.get(var_caller) {
+                                    final_speaker = speaker.clone();
                                 }
                                 // If var is somewhere in the listener name list, use that name
                                 else if let Some(speaker) =
