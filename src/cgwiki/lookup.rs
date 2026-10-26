@@ -109,8 +109,6 @@ pub mod sheet_lookup {
             .iter()
             .find(|(x, _)| x == col_name)?;
 
-        println!("Check def: {:?}", column_def);
-
         match row.field(column_def).ok()? {
             Field::String(sestring) => {
                 return Some(format_string(state.excel, &sestring, state.input));

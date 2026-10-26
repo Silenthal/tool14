@@ -384,7 +384,6 @@ pub fn sheet(arguments: &mut Expressions, state: &mut CGWState) -> Result<(), Se
         let replace: Option<String>;
         if let Ok(idx) = row_index.parse::<u32>() {
             let lookup_res = sheet_lookup::lookup_sheet(state, &sheet_name, idx, &col_name);
-            println!("Second: {}, {}, {:?}", sheet_name, col_name, lookup_res);
             if let Some(x) = lookup_res {
                 // HACK: AkatsukiNote lookup
                 if sheet_name == "AkatsukiNote"
