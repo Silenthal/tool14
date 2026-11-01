@@ -4,9 +4,9 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use crate::cgwiki::input::Input;
 use crate::database_import;
 use crate::settings;
+use crate::utility::clean_quest_name;
 use anyhow::{Context, Result, anyhow};
 use ironworks::excel::{Excel, Field};
-use ironworks::file::exh::{ColumnDefinition, ColumnKind};
 use regex::Regex;
 use rusqlite::{Connection, params};
 
@@ -274,7 +274,10 @@ impl Database {
             .query_row(params![index], |row| row.get(0));
 
         match query_quest {
-            Ok(name) => Ok(Some(name)),
+            Ok(name) => {
+                let temp_name: String = name;
+                Ok(Some(clean_quest_name(&temp_name)))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }

@@ -4,10 +4,7 @@ use std::{
 };
 
 use crate::{
-    cgwiki::{
-        input::Input,
-        lookup::sheet_lookup::lookup_sheet_input,
-    },
+    cgwiki::{input::Input, lookup::sheet_lookup::lookup_sheet_input},
     database::Database,
     detail_level::DetailLevel,
     model::{
@@ -1067,6 +1064,19 @@ pub fn process(
                         let mut input = Input::new();
                         let mut param_num = 1;
                         while let Some(next) = arg_list.next() {
+                            if let Ok(Some(s)) = eval_func(database, &state, &next, None) {
+                                match s {
+                                    LuaValue::String(lvs) => input
+                                        .add_local_parameter(param_num, Value::String(lvs.clone())),
+                                    LuaValue::Integer(lvt) => {
+                                        input.add_local_parameter(param_num, Value::U32(lvt as u32))
+                                    }
+                                    _ => input.add_local_parameter(
+                                        param_num,
+                                        Value::String(next.clone()),
+                                    ),
+                                }
+                            }
                             input.add_local_parameter(param_num, Value::String(next.clone()));
                             param_num += 1;
                         }
@@ -1348,22 +1358,52 @@ pub fn process(
                         }
                     }
                     "QuestAccepted" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let complete_arg_opt = arg_list.next();
+                        let mut suffix = String::new();
+                        if let Some(LuaValue::Integer(index)) =
+                            get_self_var_value(&state, &complete_arg_opt, None)
+                        {
+                            suffix = match index {
+                                202 => ", society".to_string(),
+                                1136 => ", island".to_string(),
+                                1279 => ", wachumeqimeqi".to_string(),
+                                1397 => ", cosmic".to_string(),
+                                1618 => ", ffvii".to_string(),
+                                _ => String::new(),
+                            }
+                        }
                         let prefix = if detail_level == DetailLevel::FullScript {
                             format!("{}\n", cap[0].to_string())
                         } else {
                             String::new()
                         };
-                        temp_dialogue_line = "-quest accepted".to_string();
-                        format!("{prefix}\n-quest accepted")
+                        temp_dialogue_line = format!("-quest accepted{suffix}");
+                        format!("{prefix}\n-quest accepted{suffix}")
                     }
                     "QuestCompleted" => {
+                        let mut arg_list = arg_list_ls.into_iter();
+                        let complete_arg_opt = arg_list.next();
+                        let mut suffix = String::new();
+                        if let Some(LuaValue::Integer(index)) =
+                            get_self_var_value(&state, &complete_arg_opt, None)
+                        {
+                            suffix = match index {
+                                203 => ", society".to_string(),
+                                1137 => ", island".to_string(),
+                                1280 => ", wachumeqimeqi".to_string(),
+                                1398 => ", cosmic".to_string(),
+                                1619 => ", ffvii".to_string(),
+                                _ => String::new(),
+                            }
+                        }
                         let prefix = if detail_level == DetailLevel::FullScript {
                             format!("{}\n", cap[0].to_string())
                         } else {
                             String::new()
                         };
-                        temp_dialogue_line = "-quest complete".to_string();
-                        format!("{prefix}\n-quest complete")
+                        temp_dialogue_line = format!("-quest complete{suffix}");
+                        format!("{prefix}\n-quest complete{suffix}")
                     }
                     s if IGNORE_LOOKUP.contains(s) && detail_level != DetailLevel::FullScript => {
                         trim_after = true;

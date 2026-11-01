@@ -6,7 +6,7 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 mod cgwiki;
@@ -26,8 +26,7 @@ use ironworks::{
 mod detail_level;
 
 use crate::{
-    database::Database, detail_level::DetailLevel, luadec::chunk, model::quest::Quest,
-    settings::Settings,
+    database::Database, detail_level::DetailLevel, luadec::chunk, model::quest::Quest, settings::Settings, utility::{clean_journal, clean_output_name, clean_todo},
 };
 
 #[derive(Parser, Debug)]
@@ -72,6 +71,10 @@ struct Args {
     #[arg(short = 'f', long)]
     quest_id_file: Option<String>,
 }
+
+static REGEX_HANDOVER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<If\(LessThan\(<Local\(1\)>,<Local\(2\)>\)\)>(?<item_search>.*)<Else>(?<item_give>.*)<\/If>(?<rest>.*)").unwrap()
+});
 
 fn print_quest(
     database: &Database,
@@ -150,21 +153,39 @@ fn print_quest(
         func_report,
     )?;
 
-    output.push_str("==Dialogue==\n");
-
+    output.push_str("==Steps==\n");
     for i in 0..24 {
-        let tag = format!("TEXT_{}_TODO_{i:02}", quest.quest_id.to_uppercase());
-        if let Some(rf) = dialogue_map
-            .get(&tag)
-            .and_then(|x| x.trim().strip_suffix("."))
-        {
-            if rf == "" {
+        let todo_tag = format!("TEXT_{}_TODO_{i:02}", quest.quest_id.to_uppercase());
+        if let Some(todo_line) = dialogue_map.get(&todo_tag) {
+            if todo_line == "" {
                 break;
             } else {
-                output.push_str(format!("<!-- ==={}=== -->\n", rf).as_str());
+                if let Some(cap) = REGEX_HANDOVER.captures(todo_line) {
+                    output.push_str(
+                        format!("*{}{}\n\n", clean_todo(&cap["item_search"]), &cap["rest"])
+                            .as_str(),
+                    );
+                    output.push_str(
+                        format!("*{}{}\n\n", clean_todo(&cap["item_give"]), &cap["rest"]).as_str(),
+                    );
+                } else {
+                    output.push_str(format!("*{}\n\n", todo_line).as_str());
+                }
             }
         }
     }
+    output.push_str("\n==Journal==\n");
+    for i in 0..24 {
+        let journal_line_tag = format!("TEXT_{}_SEQ_{i:02}", quest.quest_id.to_uppercase());
+        if let Some(journal_line) = dialogue_map.get(&journal_line_tag) {
+            if journal_line == "" {
+                break;
+            } else {
+                output.push_str(format!("*{}\n\n", clean_journal(journal_line)).as_str());
+            }
+        }
+    }
+    output.push_str("\n==Dialogue==\n");
 
     for handover in replace_result.handover {
         output.push_str(format!("<!-- {} -->\n", handover).as_str());
@@ -190,6 +211,7 @@ fn print_quest(
         (Regex::new(r"\t")?, "    "),
         (Regex::new(r".* = function(.*)\nend\n")?, ""),
         (Regex::new(r"\nend\n\n(\n)+")?, "\nend\n\n"),
+        (Regex::new(r"-cutscene end\n-cutscene start\n")?, ""),
         (Regex::new(r"> if.*\n---\n")?, ""),
         (Regex::new(r"\n\n+")?, "\n\n"),
         (Regex::new(r" +\n")?, "\n"),
@@ -209,8 +231,14 @@ fn read_all(database: &Database, ironworks: &Ironworks, excel: &Excel, args: &Ar
             continue;
         }
         println!("Processing quest {}", quest.number);
-        let output_path_specific =
-            output_path_mult.join(format!("{} - {}.txt", quest.number, quest.quest_id));
+        let suffix = if quest.name != "" {
+            quest.name.clone()
+        } else {
+            quest.quest_id.clone()
+        };
+        let base_name = clean_output_name(&format!("{} - {}.txt", quest.number, suffix));
+        let output_path_specific = output_path_mult.join(base_name);
+
         let output = print_quest(database, ironworks, excel, &quest, args, &mut func_report)?;
         if let Some(parent) = output_path_specific.parent() {
             fs::create_dir_all(parent)
@@ -239,8 +267,13 @@ fn read_multiple(
             continue;
         }
         println!("Processing quest {}", quest.number);
-        let output_path_specific =
-            output_path_mult.join(format!("{} - {}.txt", quest.number, quest.quest_id));
+        let suffix = if quest.name != "" {
+            quest.name.clone()
+        } else {
+            quest.quest_id.clone()
+        };
+        let base_name = clean_output_name(&format!("{} - {}.txt", quest.number, suffix));
+        let output_path_specific = output_path_mult.join(&base_name);
         let output = print_quest(database, ironworks, excel, &quest, args, &mut func_report)?;
         if let Some(parent) = output_path_specific.parent() {
             fs::create_dir_all(parent)
@@ -265,7 +298,13 @@ fn read_single(
     if let Some(op) = output_path_opt {
         output_path = PathBuf::from(&op);
     } else {
-        output_path = PathBuf::from(format!("{} - {}.txt", quest.number, &quest.quest_id[..9]));
+        let suffix = if quest.name != "" {
+            quest.name.clone()
+        } else {
+            quest.quest_id.clone()
+        };
+        let base_name = clean_output_name(&format!("{} - {}.txt", quest.number, suffix));
+        output_path = PathBuf::from(base_name);
     }
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)

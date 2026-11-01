@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::database::Database;
+use crate::utility::clean_quest_name;
 use crate::{
     model::{
         quest_listener_param::QuestListenerParam, quest_param::QuestParam, todo_param::TodoParam,
@@ -32,6 +33,7 @@ pub struct Quest {
 impl Quest {
     pub fn from_row(database: &Database, row: &Row) -> Result<Quest> {
         let required_job_int: i32 = row.get("ClassJobRequired")?;
+        let mut temp_quest_name: String = row.get("Name")?;
         let mut required_job = String::new();
         if required_job_int != 0 {
             required_job = utility::head_all(
@@ -75,9 +77,10 @@ impl Quest {
             if quest_id == 0 {
                 break;
             }
-            let req_quest_name = database
-                .get_name_in_table("Quest", "Name", quest_id)?
-                .unwrap_or(format!("#{quest_id}"));
+            let req_quest_name = match database.get_quest_name(quest_id) {
+                Ok(Some(qn)) => qn,
+                _ => format!("#{quest_id}"),
+            };
             if req_quest_name != "" {
                 req_quest_list.push(format!("{req_quest_name} ({quest_id})"));
             }
@@ -120,7 +123,7 @@ impl Quest {
         Ok(Quest {
             number: row.get("RowId")?,
             quest_id: row.get("Id")?,
-            name: row.get("Name")?,
+            name: clean_quest_name(&temp_quest_name),
             genre: row.get("GenreName").unwrap_or_default(),
             category: row.get("CategoryName").unwrap_or_default(),
             section: row.get("SectionName").unwrap_or_default(),
