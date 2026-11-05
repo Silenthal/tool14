@@ -423,6 +423,9 @@ pub fn sheet(arguments: &mut Expressions, state: &mut CGWState) -> Result<(), Se
                 ("GCRankUldahMaleText" | "GCRankUldahFemaleText", "<Global(54)>", "Singular") => {
                     Some("[Ul'dah GC Title]".to_string())
                 }
+                ("ClassJob", "<Global(68)>", "Name") => {
+                    Some("[Job]".to_string())
+                }
                 _ => None,
             };
         }

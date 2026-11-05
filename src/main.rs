@@ -185,7 +185,7 @@ fn print_quest(
             }
         }
     }
-    
+
     output.push_str("==Related NPCs==\n{{Related NPCs}}\n");
 
     output.push_str("\n==Dialogue==\n");
