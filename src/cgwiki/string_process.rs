@@ -52,7 +52,7 @@ const REPLACES: &[(&str, &str)] = &[
         "<Head([GC Title])> [Surname]",
     ),
     (
-        "<IfClassJob(armorer)>an [Job],Name)><Else><IfClassJob(alchemist)>an [Job],Name)><Else><IfClassJob(archer)>an [Job],Name)><Else><IfClassJob(arcanist)>an [Job],Name)><Else><IfClassJob(astrologian)>an [Job],Name)><Else>a [Job],Name)></IfClassJob></IfClassJob></IfClassJob></IfClassJob></IfClassJob>",
+        "<IfClassJob(armorer)>an [Job]<Else><IfClassJob(alchemist)>an [Job]<Else><IfClassJob(archer)>an [Job]<Else><IfClassJob(arcanist)>an [Job]<Else><IfClassJob(astrologian)>an [Job]<Else>a [Job]</IfClassJob></IfClassJob></IfClassJob></IfClassJob></IfClassJob>",
         "{{alternatives|an [Job]|a [Job]}}"
     ),
     (
