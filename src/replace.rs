@@ -722,6 +722,9 @@ pub fn process(
                                         .unwrap_or(&final_dialogue_line)
                                         .to_string();
                                 }
+                                if final_speaker == "SYSTEM" && alt_name_speaker != "" {
+                                    final_speaker = "x".to_string();
+                                }
                                 trim_after = detail_level != DetailLevel::FullScript;
                                 let prefix = if detail_level == DetailLevel::FullScript {
                                     format!("{}\n", cap[0].to_string())
@@ -803,6 +806,9 @@ pub fn process(
                                         .unwrap_or(&final_dialogue_line)
                                         .to_string();
                                 }
+                                if final_speaker == "SYSTEM" && alt_name_speaker != "" {
+                                    final_speaker = "x".to_string();
+                                }
                                 trim_after = detail_level != DetailLevel::FullScript;
                                 let prefix = if detail_level == DetailLevel::FullScript {
                                     format!("{}\n", cap[0].to_string())
@@ -881,6 +887,9 @@ pub fn process(
                                         .strip_prefix(format!("(-{alt_name}-)").as_str())
                                         .unwrap_or(&final_dialogue_line)
                                         .to_string();
+                                }
+                                if final_speaker == "SYSTEM" && alt_name_speaker != "" {
+                                    final_speaker = "x".to_string();
                                 }
                                 trim_after = detail_level != DetailLevel::FullScript;
                                 let prefix = if detail_level == DetailLevel::FullScript {
@@ -962,6 +971,9 @@ pub fn process(
                                         .unwrap_or(&final_dialogue_line)
                                         .to_string();
                                 }
+                                if final_speaker == "SYSTEM" && alt_name_speaker != "" {
+                                    final_speaker = "x".to_string();
+                                }
                                 trim_after = detail_level != DetailLevel::FullScript;
                                 let prefix = if detail_level == DetailLevel::FullScript {
                                     format!("{}\n", cap[0].to_string())
@@ -1038,6 +1050,9 @@ pub fn process(
                                         .strip_prefix(format!("(-{alt_name}-)").as_str())
                                         .unwrap_or(&final_dialogue_line)
                                         .to_string();
+                                }
+                                if final_speaker == "SYSTEM" && alt_name_speaker != "" {
+                                    final_speaker = "x".to_string();
                                 }
                                 trim_after = detail_level != DetailLevel::FullScript;
                                 let prefix = if detail_level == DetailLevel::FullScript {
