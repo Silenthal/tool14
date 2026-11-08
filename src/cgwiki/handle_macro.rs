@@ -228,22 +228,47 @@ pub fn r#if(
                     write_custom_if_tag(state, "IfUldahGC", &a1, &a2)
                 }
                 (operator::EQ, "<Global(68)>", _, _, _) => {
-                    if let Some(job_name) = comparison
+                    let job_name = comparison
                         .2
                         .parse::<u32>()
                         .ok()
                         .and_then(|f| sheet_lookup::get_class_job(state, f))
-                    {
-                        write_custom_if_with_condition_tag(state, "IfClassJob", &job_name, &a1, &a2)
+                        .unwrap_or(comparison.2);
+                    let a1_final = if_option_1(&a1, &job_name);
+                    let a2_final = if_option_2(&a2, &job_name);
+                    if a1_final.contains("<IfTask>") || a2_final.contains("<IfTask>") {
+                        // HACK: Used for quest steps
+                        state.writer.write_str("{{classjob|")?;
+                        if a2_final != "" {
+                            state.writer.write_str(&format!("{a1_final}|{a2_final}"))?;
+                        } else {
+                            state.writer.write_str(&a1_final)?;
+                        }
+                        state.writer.write_str("}}")
                     } else {
-                        write_custom_if_with_condition_tag(
-                            state,
-                            "IfClassJob",
-                            &comparison.2,
-                            &a1,
-                            &a2,
-                        )
+                        write_custom_if_with_condition_tag(state, "IfClassJob", &job_name, &a1, &a2)
                     }
+                }
+                (operator::EQ, "<Local(4)>", _, _, _) => {
+                    let job_name = comparison
+                        .2
+                        .parse::<u32>()
+                        .ok()
+                        .and_then(|f| sheet_lookup::get_class_job(state, f))
+                        .unwrap_or(comparison.2);
+                    let a1_final = if_option_1(&a1, &job_name);
+                    let a2_final = if_option_2(&a2, &job_name);
+                    // HACK: Used for quest steps
+                    state.writer.write_str("{{classjob|")?;
+                    if a2_final != "" {
+                        state.writer.write_str(&format!("{a1_final}|{a2_final}"))?;
+                    } else {
+                        state.writer.write_str(&a1_final)?;
+                    }
+                    state.writer.write_str("}}")
+                }
+                (operator::LT, "<Local(1)>", "<Local(2)>", _, _) => {
+                    write_custom_if_tag(state, "IfTask", &a1, &a2)
                 }
                 (
                     operator::EQ,
@@ -266,6 +291,29 @@ pub fn r#if(
         }
     } else {
         write_custom_if_with_condition_tag(state, &if_type, &cond, &a1, &a2)
+    }
+}
+
+fn if_option_1(a1: &str, job_name: &str) -> String {
+    if a1.contains("<IfTask>") {
+        // First option of "if" is usually "clean", so this is fine
+        format!("(If {job_name}) {a1}")
+    } else {
+        a1.to_string()
+    }
+}
+
+fn if_option_2(a2: &str, _job_name: &str) -> String {
+    if a2.contains("{{classjob") {
+        // a2 is part of a prior classjob/task, so
+        let a2_stripped = a2
+            .strip_prefix("{{classjob|")
+            .and_then(|s| s.strip_suffix("}}"))
+            .unwrap_or(&a2);
+        // paren_insert(a2_stripped, &_job_name)
+        a2_stripped.to_string()
+    } else {
+        a2.to_string()
     }
 }
 
@@ -423,9 +471,7 @@ pub fn sheet(arguments: &mut Expressions, state: &mut CGWState) -> Result<(), Se
                 ("GCRankUldahMaleText" | "GCRankUldahFemaleText", "<Global(54)>", "Singular") => {
                     Some("[Ul'dah GC Title]".to_string())
                 }
-                ("ClassJob", "<Global(68)>", "Name") => {
-                    Some("[Job]".to_string())
-                }
+                ("ClassJob", "<Global(68)>", "Name") => Some("[Job]".to_string()),
                 _ => None,
             };
         }
@@ -547,6 +593,79 @@ fn state_write_single(state: &mut CGWState, tag: &str, arg: String) -> Result<()
     state.writer.write_str("(")?;
     state.writer.write(arg)?;
     state.writer.write_str(")>")
+}
+
+pub fn en_noun(arguments: &mut Expressions, state: &mut CGWState) -> Result<(), SeStringError> {
+    // Item,2,50052,1,1
+    let arg_list = from_expressions::take_value_list(arguments, state)?;
+
+    if arg_list.len() == 5 {
+        let sheet_name: String = arg_list[0].clone().into();
+        let attributive: String = arg_list[1].clone().into();
+        let row_index: String = arg_list[2].clone().into();
+        let column_index: u32 = arg_list[3].clone().into();
+        let replace: Option<String>;
+        // let i2: u32 = arg_list[4].clone().into();
+        let col_name: String = if column_index == 2 {
+            "Plural".to_string()
+        } else {
+            "Singular".to_string()
+        };
+
+        if let Ok(idx) = row_index.parse::<u32>() {
+            let lookup_res = sheet_lookup::lookup_sheet(state, &sheet_name, idx, &col_name);
+            let vowel = sheet_lookup::lookup_sheet(state, &sheet_name, idx, "StartsWithVowel");
+            let is_article = sheet_lookup::lookup_sheet(state, &sheet_name, idx, "Article");
+            if let Some(x) = lookup_res
+                && let Some(is_v) = vowel
+            {
+                // NOTE: Should look up article in "Attributive"
+                let article;
+                if let Some(v) = is_article
+                    && v == "1"
+                {
+                    article = String::new()
+                } else {
+                    article = match (attributive.trim(), column_index, is_v.as_str()) {
+                        ("a", _, "0") | ("1", 1, "0") => "a ".to_string(),
+                        ("a", _, "1") | ("1", 1, "1") => "an ".to_string(),
+                        ("2", _, "0" | "1") => "the ".to_string(),
+                        _ => String::new(),
+                    };
+                }
+                replace = Some(format!("{article}{x}"))
+            } else {
+                replace = None
+            }
+        } else {
+            replace = None;
+        }
+
+        match replace {
+            Some(text) => state.writer.write(text),
+            None => {
+                state.writer.write_str("<EnNoun(")?;
+                for (i, value) in arg_list.iter().enumerate() {
+                    if i > 0 {
+                        state.writer.write_str(",")?;
+                    }
+                    let val_s: String = value.clone().into();
+                    state.writer.write(val_s)?;
+                }
+                state.writer.write_str(")>")
+            }
+        }
+    } else {
+        state.writer.write_str("<EnNoun(")?;
+        for (i, value) in arg_list.iter().enumerate() {
+            if i > 0 {
+                state.writer.write_str(",")?;
+            }
+            let val_s: String = value.clone().into();
+            state.writer.write(val_s)?;
+        }
+        state.writer.write_str(")>")
+    }
 }
 
 pub fn generic(

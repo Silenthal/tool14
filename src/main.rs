@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
 use regex::Regex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader},
     path::PathBuf,
@@ -26,7 +26,12 @@ use ironworks::{
 mod detail_level;
 
 use crate::{
-    database::Database, detail_level::DetailLevel, luadec::chunk, model::quest::Quest, settings::Settings, utility::{clean_journal, clean_output_name, clean_todo},
+    database::Database,
+    detail_level::DetailLevel,
+    luadec::chunk,
+    model::quest::Quest,
+    settings::Settings,
+    utility::{clean_journal, clean_output_name, clean_todo},
 };
 
 #[derive(Parser, Debug)]
@@ -73,8 +78,11 @@ struct Args {
 }
 
 static REGEX_HANDOVER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<If\(LessThan\(<Local\(1\)>,<Local\(2\)>\)\)>(?<item_search>.*)<Else>(?<item_give>.*)<\/If>(?<rest>.*)").unwrap()
+    Regex::new(r"<IfTask>(?<item_search>.*)<Else>(?<item_give>.*)<\/IfTask>(?<rest>.*)").unwrap()
 });
+
+static REGEX_MULTI: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\{\{alternatives\|(?<task_list>.*)\}\}(?<rest>.*)").unwrap());
 
 fn print_quest(
     database: &Database,
@@ -160,7 +168,56 @@ fn print_quest(
             if todo_line == "" {
                 break;
             } else {
-                if let Some(cap) = REGEX_HANDOVER.captures(todo_line) {
+                if let Some(cap_task) = REGEX_MULTI.captures(todo_line) {
+                    let cap_task_end = match cap_task.name("rest") {
+                        Some(r) => r.as_str(),
+                        None => "",
+                    };
+                    let base_tt = &cap_task["task_list"].to_string();
+                    let mut temp_map = HashSet::new();
+                    let mut pre_task = Vec::new();
+                    let mut post_task = Vec::new();
+                    for line in base_tt.split("|") {
+                        let preamble = if let Some(last) = line.find(')') {
+                            line[..last + 2].to_string()
+                        } else {
+                            String::new()
+                        };
+                        let line_str = line.strip_prefix(&preamble).unwrap_or(line);
+                        if let Some(cap) = REGEX_HANDOVER.captures(line_str) {
+                            let split_line_1 = format!(
+                                "*{}{}{}{}\n\n",
+                                preamble,
+                                clean_todo(&cap["item_search"]),
+                                &cap["rest"],
+                                cap_task_end
+                            );
+                            let split_line_2 = format!(
+                                "*{}{}{}{}\n\n",
+                                preamble,
+                                clean_todo(&cap["item_give"]),
+                                &cap["rest"],
+                                cap_task_end
+                            );
+                            if !temp_map.contains(&split_line_1) {
+                                pre_task.push(split_line_1.clone());
+                                temp_map.insert(split_line_1);
+                            }
+                            if !temp_map.contains(&split_line_2) {
+                                post_task.push(split_line_2.clone());
+                                temp_map.insert(split_line_2);
+                            }
+                        }
+                    }
+                    for pre in pre_task {
+                        output.push_str(&pre);
+                    }
+                    for post in post_task {
+                        output.push_str(&post);
+                    }
+                } else if todo_line.matches("<If").count() == 1
+                    && let Some(cap) = REGEX_HANDOVER.captures(todo_line)
+                {
                     output.push_str(
                         format!("*{}{}\n\n", clean_todo(&cap["item_search"]), &cap["rest"])
                             .as_str(),

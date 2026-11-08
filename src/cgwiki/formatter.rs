@@ -93,7 +93,7 @@ fn format_macro(payload: MacroPayload, state: &mut CGWState) -> Result<(), SeStr
         // 1 = a/n
         // "a" = a?
         MacroKind::JaNoun => handle_macro::generic("JaNoun", &mut arguments, state),
-        MacroKind::EnNoun => handle_macro::generic("EnNoun", &mut arguments, state),
+        MacroKind::EnNoun => handle_macro::en_noun(&mut arguments, state),
         MacroKind::DeNoun => handle_macro::generic("DeNoun", &mut arguments, state),
         MacroKind::FrNoun => handle_macro::generic("FrNoun", &mut arguments, state),
         MacroKind::ChNoun => handle_macro::generic("ChNoun", &mut arguments, state),

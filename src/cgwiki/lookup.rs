@@ -114,6 +114,7 @@ pub mod sheet_lookup {
                 return Some(format_string(state.excel, &sestring, state.input));
             }
             Field::I32(i) => return Some(i.to_string()), // HACK: AkatsukiNote lookup
+            Field::I8(i) => return Some(i.to_string()),
             _ => return None,
             // Field::Bool(_) => return None,
             // Field::I8(_) => return None,

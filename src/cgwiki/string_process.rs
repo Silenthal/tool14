@@ -53,12 +53,13 @@ const REPLACES: &[(&str, &str)] = &[
     ),
     (
         "<IfClassJob(armorer)>an [Job]<Else><IfClassJob(alchemist)>an [Job]<Else><IfClassJob(archer)>an [Job]<Else><IfClassJob(arcanist)>an [Job]<Else><IfClassJob(astrologian)>an [Job]<Else>a [Job]</IfClassJob></IfClassJob></IfClassJob></IfClassJob></IfClassJob>",
-        "{{alternatives|an [Job]|a [Job]}}"
+        "{{alternatives|an [Job]|a [Job]}}",
     ),
     (
         "<If(LessThan(<Global(68)>,8))>[Job]<Else><If(GreaterThan(<Global(68)>,18))>[Job]</If></If>",
-        "[Job]"
-    )
+        "[Job]",
+    ),
+    ("{{classjob", "{{alternatives"),
 ];
 
 static LOOKUP: LazyLock<AhoCorasick> = LazyLock::new(|| {
